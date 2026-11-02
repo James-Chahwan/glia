@@ -10,11 +10,14 @@ against, and every stratum under its floor becomes a packet in the FD precision 
 - **Population.** Every edge of every per-language graph plus the cross edges of a
   `generate_one` build of each tree in `snapshots.json`, five rows:
   - glia itself (`source: self`), extracted with `git archive` to
-    `$GLIA_RANK_GATE_DIR/glia@<rev12>`. Its `rev` is pinned at
-    0df1bbbb89b7276e298b301d6c29bdf628d39d53, the commit FD.3a drew its sample at, so a
-    re-draw keeps glia's sampled rows and FD.3a's verdicts on them (a self row without `rev`,
-    or `"rev": "HEAD"`, audits HEAD). Its skips drop the fixture trees `bench/`,
-    `dev-notes/`, `tests/` and `engine/tests/data/`, so glia's stratum measures glia's code.
+    `$GLIA_RANK_GATE_DIR/glia@<rev12>`. Its `rev` is pinned at the 0.5.7 release candidate
+    558fa99229faf16d61d5b25fd5a83017951bfa1a (HP.5; FD.3a drew at 0df1bbbb, GP.14 at
+    ad5dd83d), so a re-draw keeps glia's sampled rows and their verdicts wherever an edge's
+    site did not move (a self row without `rev`, or `"rev": "HEAD"`, audits HEAD). Its skips
+    drop the fixture trees `bench/`, `dev-notes/`, `tests/` and `engine/tests/data/`, so
+    glia's stratum measures glia's code, and (since HP.5) `engine/src/rules/reflexion_parity.rs`,
+    the parity harness against a private repository's report, whose names are that
+    repository's.
   - three rank-gate public snapshots (`source: rank-gate`), read by name from
     `bench/rank-gate/snapshots.json`: pop-os/shell TypeScript, gorilla/websocket Go,
     flutter/samples Dart.
@@ -32,9 +35,10 @@ against, and every stratum under its floor becomes a packet in the FD precision 
   https and pinned at a 40-hex commit is refused.
 - **Out of the population**, counted per reason in each sample header and the marker's
   `excluded=`: a `--skip` prefix on the from-node's file (`skip`); every TRACES edge
-  (`traces`), every edge touching a GOAL_UNIT node (`goal_unit`) and every edge emitted by
-  `resolver:org_packages` (`org_packages`): those 0.5.4 layers are gated by their own audits,
-  so this one stays the baseline of the 0.5.3 edge vocabulary. An edge with neither both ends
+  (`traces`) and every edge touching a GOAL_UNIT node (`goal_unit`): the goal layer is
+  0.5.8's and writes no edge in 0.5.7. Org-package routing (`resolver:org_packages`, rules
+  `org_import` / `org_call` / `org_ref`) is in the population since the 0.5.7 proof run
+  (HP.5): its edges are ordinary IMPORTS / CALLS / USES strata. An edge with neither both ends
   located nor an evidence file cannot be judged against source: it is counted per stratum as
   `unjudgeable` and never sampled.
 - **Strata.** (edge category, evidence tier), the tier `glia why` prints
@@ -114,7 +118,7 @@ before any held-out id was sampled or judged) measures that on repos the fit nev
 - **Judging.** As the fit: `show <label>` (it picks the held-out file for a held-out label), first
   verdicts in `verdicts/heldout.jsonl`, the matched blind re-judge appended to `verdicts/rejudge.jsonl`,
   disagreements in `adjudication.jsonl`.
-- **Panels never mix.** `report` reads only the fit panel's samples and the verdicts of their ids
+- **Panels never mix.** `report --panel fit` reads only the fit panel's samples and the verdicts of their ids
   (a verdict or adjudication row of a held-out id is known and skipped), so `report --check` holds
   with held-out files beside the fit's; `calibrate` reads only the held-out panel's.
 - **Calibration.** `bash scripts/edge-audit.sh calibrate [--check]` runs `edge_audit report
@@ -130,3 +134,27 @@ before any held-out id was sampled or judged) measures that on repos the fit nev
   tasks.jsonl` at `COHORT_REV`). It writes `calibration.json` / `calibration.md` and prints
   `[edge-audit] calibration strata=<k> fit_n=<a> heldout_n=<b> covered=<c>/<k> cal_error=<e>` and
   `CONFIDENCE: R1=<yes|no> (<c>/<k>) R2=<yes|no> (<e>) R3=<yes|no> (<k>) -> PASS|FAIL|INSUFFICIENT`.
+
+## The 0.5.7 proof run (HP.5): both panels, one rule
+
+`report` reads `--panel all` by default since HP.5 (`--panel fit` is the fit report above,
+`--panel heldout` the held-out alone): the fit samples (re-drawn at the release candidate) and
+the held-out samples (as HC.3 judged them, never re-drawn here: they are the calibration's), each
+pooled stratum post-stratified per panel, since the two panels were drawn at different n. A
+pooled stratum's p is the stratified estimate over its judged panel parts (weights N_hg over
+their N) with that estimate's interval; a tier's or category's estimate is stratified over every
+judged (stratum, panel) part. report.json gains `panel: "all"`, each stratum's `panels` and the
+agreement's `independence`; report.md a "Strata by panel" table. `calibrate` is unchanged.
+
+`RULE-0.5.7.md`, committed before the sample was drawn, is the run's pass rule. When it sits
+beside the plan, `report --panel all` prints the computed verdict and the re-judge's independence:
+
+```
+[edge-audit] rule 0.5.7 verdict=<PASS|FAIL> under_floor=<list|none> fact=<p> derived=<p> heuristic=<p> kappa=<k>
+[edge-audit] rule 0.5.7 rejudge independent=<i> self=<s>
+```
+
+A re-judge pair is a self pair when its re-judge name, less one trailing `r`, is its first
+judge's (GP.14r / GP.14, HC.3r / HC.3); the rule's kappa is over the independent pairs only.
+HP.5's re-judge (`HP.5x`) is a separate, blinded `claude -p` process per snapshot. The write-up
+is `dev-notes/edge-precision-0.5.7.md`.

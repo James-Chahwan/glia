@@ -5,24 +5,18 @@
 {"id": "000078ccc35753f3", "verdict": "correct", "reason": "Intent__getStringExtra calls load_method, defined in dartjni.h which health_connect.c includes", "judge": "FD.3c"}
 {"id": "0001242a2010ca46", "verdict": "correct", "reason": "clean_and_cap_doc returns Some(cap_doc(s)), the same file's fn", "judge": "FD.3c"}
 {"id": "00014834337f29ba", "verdict": "correct", "reason": "paths.rs declares the module-level fn glob", "judge": "FD.3c"}
-{"id": "00025a554a0ab02f", "verdict": "correct", "reason": "the textEditingValue getter is a member of BasicTextInputClientState (class opened at line 61)", "judge": "FD.3c"}
-{"id": "000268b94e414f9a", "verdict": "correct", "reason": "evaluate constructs Outcome::Error(e), the variant declared at line 1018", "judge": "FD.3c"}
 {"id": "0002ed8486eabdce", "verdict": "correct", "reason": "the fn calls load_static_field, defined in the included dartjni.h", "judge": "FD.3c"}
-{"id": "000383d1bfe3e9a8", "verdict": "correct", "reason": "classify_call maps a node through text_of, the file's one fn of that name", "judge": "FD.3c"}
 {"id": "00042f7e1acbd75b", "verdict": "correct", "reason": "the alloydb component's container patch declares ALLOYDB_TABLE_NAME under env:", "judge": "FD.3c"}
 {"id": "0004ef8df104bff4", "verdict": "correct", "reason": "junit.rs declares pub fn parse_junit", "judge": "FD.3c"}
 {"id": "0005314661dfb255", "verdict": "correct", "reason": "image_page.dart imports 'context_menu_region.dart' in its own directory", "judge": "FD.3c"}
 {"id": "00063d73556e5998", "verdict": "correct", "reason": "the test calls the file's own chain(N) helper", "judge": "FD.3c"}
-{"id": "00073d333fb77eae", "verdict": "correct", "reason": "rust_lapin_rows passes module_id(), the helper of the file's one tests module (the second `mod tests` text is a fixture string)", "judge": "FD.3c"}
 {"id": "0007ee80c06e817a", "verdict": "correct", "reason": "prepared_test.go declares package var preparedMessageTests", "judge": "FD.3c"}
 {"id": "0007f693ee69f039", "verdict": "correct", "reason": "the test calls route_id, the helper of the same tests module", "judge": "FD.3c"}
 {"id": "00084b7e03f216d8", "verdict": "correct", "reason": "unknown_names calls errors(&p), the helper of the same tests module", "judge": "FD.3c"}
 {"id": "0008998d2306209e", "verdict": "correct", "reason": "build constructs DefaultValuesPage(..), imported from default_values_page.dart", "judge": "FD.3c"}
 {"id": "0008f26b62a233b1", "verdict": "correct", "reason": "three_react_repos calls the file's own write(root, rel, text)", "judge": "FD.3c"}
 {"id": "0009534e10d89cc5", "verdict": "correct", "reason": "the test calls read_paths_at, reached through use super::* in git_rev's tests", "judge": "FD.3c"}
-{"id": "00097d9208ce1074", "verdict": "correct", "reason": "graph_of calls self.graphs(id), a method of the same impl", "judge": "FD.3c"}
 {"id": "0009ef2b294c3f34", "verdict": "correct", "reason": "toy_core calls RepoId::from_canonical; sections.rs imports glia_core's RepoId", "judge": "FD.3c"}
-{"id": "000af2dc2be05046", "verdict": "correct", "reason": "the test calls qnames(&c), the tests module's helper", "judge": "FD.3c"}
 {"id": "006a37f3a51dab5e", "verdict": "correct", "reason": "frontend.yaml's container env declares AD_SERVICE_ADDR", "judge": "FD.3c"}
 {"id": "008865a8ead3db93", "verdict": "correct", "reason": "shoppingassistantservice requirements.txt pins idna==3.10", "judge": "FD.3c"}
 {"id": "009995846a30003d", "verdict": "correct", "reason": "animations/pubspec.yaml lists flutter_animate under dependencies", "judge": "FD.3c"}
@@ -30,28 +24,11 @@
 {"id": "00f1bad673f9faef", "verdict": "correct", "reason": "the buildscript block declares classpath org.jetbrains.kotlin:kotlin-gradle-plugin", "judge": "FD.3c"}
 {"id": "00f75faa72d4d381", "verdict": "correct", "reason": "the recommendationservice template's env declares PORT", "judge": "FD.3c"}
 {"id": "010906133778fbcb", "verdict": "correct", "reason": "paymentservice.yaml's env declares DISABLE_PROFILER", "judge": "FD.3c"}
-{"id": "0119d378b30ca5dc", "verdict": "correct", "reason": "the section names resolve_frame as the code that subtracts 1 from a 1-based line, which this method does", "judge": "FD.3c"}
 {"id": "016485aa5e8ea6d3", "verdict": "correct", "reason": "loadgenerator requirements.txt pins flask-login==0.6.3", "judge": "FD.3c"}
 {"id": "01a6721b821f04d8", "verdict": "correct", "reason": "testing_app's pubspec lists test under dev_dependencies", "judge": "FD.3c"}
-{"id": "000078bf6864f49c", "verdict": "correct", "reason": "DeclaredDirs::new(&cfg.project) is walk.rs's DeclaredDirs::new", "judge": "GP.14r"}
 {"id": "0000fae86f0c2dd5", "verdict": "correct", "reason": "binary_name is declared at cli.rs module level", "judge": "GP.14r"}
-{"id": "000112747f59ef27", "verdict": "correct", "reason": "IMPLEMENTS is a const declared inside mod edge_category", "judge": "GP.14r"}
 {"id": "0001d2d122b779d2", "verdict": "correct", "reason": "fn at is declared at fusions.rs module level", "judge": "GP.14r"}
 {"id": "00031125f58d273c", "verdict": "correct", "reason": "WireImport's enum body declares Render", "judge": "GP.14r"}
-{"id": "0003378bf90d3e6e", "verdict": "correct", "reason": "push_call is the endpoint_fold tests module's helper fn", "judge": "GP.14r"}
-{"id": "000ad1cdfb07be45", "verdict": "correct", "reason": "gate_trim_main calls std::env::var(\"GLIA_RANK_GATE_HEAD\")", "judge": "GP.14r"}
-{"id": "008abd88854e4b35", "verdict": "correct", "reason": "the 0.5.3-and-earlier section lists glia_graph::build_dart (DT.5h) by its path", "judge": "GP.14r"}
-{"id": "01630801666e6cf3", "verdict": "wrong", "reason": "name_breaks in the 0.5.4 notes is a review_vs_rev result key, not the engine function", "judge": "GP.14r"}
-{"id": "02ff46d73f27c855", "verdict": "wrong", "reason": "resolve_signal here is the removed glia_py method, not MergedGraph::resolve_signal", "judge": "GP.14r"}
-{"id": "0454588ea1ad0b29", "verdict": "wrong", "reason": "forbid_edge here names a [[constraint]] kind, not check.rs's private function", "judge": "GP.14r"}
-{"id": "0bd85a441cfc5ffa", "verdict": "wrong", "reason": "empty_scopes here is a try report key, not trial.rs's function", "judge": "GP.14r"}
-{"id": "0c06c126ce95da71", "verdict": "wrong", "reason": "abi_ref here is a key of the evm hit cell, not evm/ts.rs's function", "judge": "GP.14r"}
-{"id": "0c4d08dd2adbe0d0", "verdict": "wrong", "reason": "receiver_return here is a TS CALLS rule name, not CppScope's method", "judge": "GP.14r"}
-{"id": "0d9155e9a77a3215", "verdict": "wrong", "reason": "the Python README's review_vs_rev is glia_py's function, not engine review::review_vs_rev", "judge": "GP.14r"}
-{"id": "316713dac596e4ca", "verdict": "wrong", "reason": "using static Grpc.Health.V1.Health names the generated NuGet Health class, not this file's grpc_server node", "judge": "GP.14r"}
-{"id": "37f3fb4864c76e5d", "verdict": "wrong", "reason": "\"encoding/json\" is the Go standard library package, not the repo's json.go", "judge": "GP.14r"}
-{"id": "531c330eaaaa9cb9", "verdict": "wrong", "reason": "import java.util.ArrayList names the JDK class, not an in-repo event emitter", "judge": "GP.14r"}
-{"id": "a6194887876b42ae", "verdict": "wrong", "reason": "Tab in this section is the Alt+Tab key, not the Tab interface of stack.ts", "judge": "GP.14r"}
 {"id": "000049c92db26f6d", "verdict": "correct", "reason": "random_email() at line 255 is the factories.py function the test imports", "judge": "HC.3r"}
 {"id": "000055e3c941c3fa", "verdict": "wrong", "reason": "the test's subject is the Contents.Operations Extensions class (alias ExtensionSut), not CodeGenerator/Extensions.cs", "judge": "HC.3r"}
 {"id": "00009d06a4542f4d", "verdict": "correct", "reason": "tab.ts's TabService implements the TabService interface from index.ts, whose member getTabsRefTo it defines", "judge": "HC.3r"}
@@ -108,3 +85,19 @@
 {"id": "29bf653677a532fc", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :ruleId page is unrelated", "judge": "HC.3r"}
 {"id": "3a8445c103547127", "verdict": "wrong", "reason": "the subscribe is a STOMP websocket subscription, not a redis pubsub consumer", "judge": "HC.3r"}
 {"id": "f65c793cc0899f27", "verdict": "wrong", "reason": "the redirect belongs to the nested custom-roles route; page:/ and page:/list are not those pages", "judge": "HC.3r"}
+{"id": "00026b09d7f0f53f", "verdict": "correct", "reason": "Line 9602 in the same tests module calls has_edge(&fp, ...), which is the fn has_edge defined at 9342.", "judge": "HP.5x"}
+{"id": "0002b2d5f153aa63", "verdict": "correct", "reason": "target_table calls push_table(blocks, ...) at line 2051, and push_table is the pub(crate) fn defined at line 2405 of the same module.", "judge": "HP.5x"}
+{"id": "0003e540010fb5fb", "verdict": "correct", "reason": "The test calls gid(node_kind::CLASS, \"src::Base\") at line 1275, which is the tests-module fn gid defined at line 1009.", "judge": "HP.5x"}
+{"id": "0004a6e0cc02d7a6", "verdict": "correct", "reason": "scope_filter.rs imports locate_node from glia_engine (line 23) and calls it at line 305; that is engine/src/answers.rs locate_node, re-exported flat through the answers glob.", "judge": "HP.5x"}
+{"id": "000500aa28bc8673", "verdict": "correct", "reason": "Line 11859 calls shapes_of(&fp, \"PUT\", \"/profile\"), which is the tests-module fn defined at line 11300.", "judge": "HP.5x"}
+{"id": "00059b5155220378", "verdict": "correct", "reason": "The tests module does `use super::*` (line 442), and line 777 calls evidence_rule(rule, diverged), the fn at line 128.", "judge": "HP.5x"}
+{"id": "00d3fa0b7614e4cc", "verdict": "wrong", "reason": "The section names the pyo3 PyGraph `set_cell` / `write_cell` (line 28), not store::container's private pub(crate) set_cell.", "judge": "HP.5x"}
+{"id": "01ba6a8e7545b6f9", "verdict": "correct", "reason": "The Data Flow section's Parallel build paragraph names `parallel::threads` by path as the place that documents the pool-size table, and describes the default thread count this fn returns.", "judge": "HP.5x"}
+{"id": "0a789600990ddd8d", "verdict": "wrong", "reason": "The Cell sidecars section documents the vectors.jsonl `text_hash` field (lines 502, 507, 523), a JSON key, not the engine fn semantic::text::text_hash.", "judge": "HP.5x"}
+{"id": "0c83d9305e8b4ef2", "verdict": "wrong", "reason": "The 0.5.6 release notes are not about the private struct `Use` in contract_breaks/names.rs; any match is the common word.", "judge": "HP.5x"}
+{"id": "101d00685ac2fc2b", "verdict": "wrong", "reason": "The Programs section's `done()` (line 63) is an example 0-arity Datalog atom, not the method IdDefs::done.", "judge": "HP.5x"}
+{"id": "14a6a52f32e3b73c", "verdict": "wrong", "reason": "The Workspace Layout section's `ppr_index` names the activation crate's ppr_index module (PprIndex), not the method RankCache::ppr_index.", "judge": "HP.5x"}
+{"id": "01ec718e5c9a2e4c", "verdict": "correct", "reason": "simplistic_editor/pubspec.yaml:39 declares an analysis_defaults dependency (path: ../analysis_defaults)", "judge": "HP.5x"}
+{"id": "024ddcc7ff348277", "verdict": "correct", "reason": "web_embedding/ng-flutter/package.json:33 declares \"jasmine-core\": \"~5.1.1\" as a dependency", "judge": "HP.5x"}
+{"id": "02090f5e6b8e1014", "verdict": "correct", "reason": "src/frontend/go.mod line 25 requires cloud.google.com/go v0.123.0 (marked indirect, but it is still a declared dependency)", "judge": "HP.5x"}
+{"id": "02a2ae37727efd3e", "verdict": "correct", "reason": "src/loadgenerator/requirements.txt line 65 pins pytest==8.4.2", "judge": "HP.5x"}

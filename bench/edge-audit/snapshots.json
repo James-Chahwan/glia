@@ -1,6 +1,6 @@
 {
  "snapshots": [
-  {"name": "glia", "source": "self", "rev": "ad5dd83d3aae3da209290dafe21a08d319558663", "public": true, "skips": ["bench/", "dev-notes/", "tests/", "engine/tests/data/"]},
+  {"name": "glia", "source": "self", "rev": "558fa99229faf16d61d5b25fd5a83017951bfa1a", "public": true, "skips": ["bench/", "dev-notes/", "tests/", "engine/tests/data/", "engine/src/rules/reflexion_parity.rs"]},
   {"name": "shell", "source": "rank-gate", "skips": []},
   {"name": "websocket", "source": "rank-gate", "skips": []},
   {"name": "samples", "source": "rank-gate", "skips": []},

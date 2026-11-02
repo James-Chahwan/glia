@@ -10,6 +10,7 @@
 //! edge_audit show   <samples.jsonl> --root <dir> [--label <l>] [--id <hex>]
 //! edge_audit report --samples <glob>.. --verdicts <glob>.. --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--judge <name>] [--check]
+//!                   [--panel all|fit|heldout]
 //!                   [--rejudge <glob>].. [--adjudication <file>]
 //!                   [--ci stratified_wilson|plugin] [--rejudge-rule matched|fd3c]
 //! edge_audit report --calibration --fit <report.json> [--fit-samples <glob>]..
@@ -24,7 +25,12 @@
 //! panel with the fit's key, seed and exclusions at [`HELDOUT_N`] per pooled
 //! stratum, every header marked `"panel":"heldout"`; the fit report reads the
 //! fit panel only ([`split_panel`], [`resolve_verdicts_scoped`]), so held-out
-//! samples and verdicts beside it never move it. `report --calibration` judges
+//! samples and verdicts beside it never move it; since HP.5 that is `report
+//! --panel fit`, and the default `--panel all` reads both panels,
+//! post-stratified per panel ([`stratum_parts`]), and judges the 0.5.7 proof
+//! run by `bench/edge-audit/RULE-0.5.7.md` ([`rule_057_lines`]: `[edge-audit]
+//! rule 0.5.7 verdict=<PASS|FAIL> ..`), its kappa over the re-judge pairs no
+//! first judge re-judged itself ([`IndependenceOut`]). `report --calibration` judges
 //! the held-out strata against the fit report by the rule committed in
 //! [`CAL_RULE`] ([`compare_strata`]: K, R1, R2, R3) and prints
 //! `[edge-audit] calibration ..` and `CONFIDENCE: .. -> PASS|FAIL|INSUFFICIENT`.
@@ -216,9 +222,12 @@ fn edge_key(
     h.finish()
 }
 
-/// Why an edge is out of the population, if it is: the 0.5.4 layers gated by
-/// their own audits (TRACES, GOAL_UNIT ends, org-package routing) and the
-/// `--skip` prefixes.
+/// Why an edge is out of the population, if it is: the goal layer's edges
+/// (TRACES, GOAL_UNIT ends; 0.5.8's, with no emitter in 0.5.7) and the
+/// `--skip` prefixes. Org-package routing (`resolver:org_packages`, rules
+/// `org_import` / `org_call` / `org_ref`) is in the population since the
+/// 0.5.7 proof run (HP.5): its edges are ordinary IMPORTS / CALLS / USES
+/// strata.
 fn exclusion(
     e: &Edge,
     from: &Located,
@@ -232,9 +241,6 @@ fn exclusion(
     let goal = node_kind::name(node_kind::GOAL_UNIT);
     if from.kind == goal || to.kind == goal {
         return Some("goal_unit");
-    }
-    if ev.is_some_and(|ev| ev.emitter == "resolver:org_packages") {
-        return Some("org_packages");
     }
     let file = from
         .file
@@ -604,6 +610,25 @@ struct StratumOut {
     floor: Option<f64>,
     status: String,
     flags: Vec<String>,
+    /// Each panel's part of the stratum (HP.5, `--panel all`): left out of a
+    /// one-panel report, so the fit report keeps its bytes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    panels: Vec<PanelPart>,
+    /// The stratified estimate's input, `(N, judged, p)` per judged or
+    /// unjudged part: one part in a one-panel report.
+    #[serde(skip)]
+    parts: Vec<(u64, u64, f64)>,
+}
+
+/// One panel's share of a pooled stratum in a `--panel all` report.
+#[derive(Debug, Clone, Serialize)]
+struct PanelPart {
+    panel: String,
+    #[serde(rename = "N")]
+    big_n: u64,
+    n: u64,
+    correct: u64,
+    p: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,6 +660,10 @@ struct ReportOut {
     /// FD.3c's method, whose committed report predates the field.
     #[serde(skip_serializing_if = "is_plugin")]
     ci_method: &'static str,
+    /// `all` when the report spans the fit and the held-out panel (HP.5),
+    /// post-stratified per panel; left out for a one-panel report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    panel: Option<&'static str>,
     strata: Vec<StratumOut>,
     categories: Vec<AggOut>,
     tiers: Vec<AggOut>,
@@ -700,21 +729,97 @@ fn stratum_out(category: &str, tier: &str, big_n: u64, c: Counts, plan: &Plan) -
         floor,
         status,
         flags,
+        panels: Vec::new(),
+        parts: vec![(
+            big_n,
+            n,
+            if n > 0 {
+                c.correct as f64 / n as f64
+            } else {
+                0.0
+            },
+        )],
     }
 }
 
-fn agg(name: &str, strata: &[&StratumOut], ci: CiMethod) -> AggOut {
-    let rows: Vec<(u64, u64, f64)> = strata
+/// A pooled stratum over its panel parts `(panel, N_hg, counts)` (HP.5): one
+/// part reads as [`stratum_out`]; several are post-stratified, p the
+/// stratified estimate over the judged parts (weights N_hg over their N) with
+/// its [`stratified_wilson`] interval, the floor and the insufficient rule read
+/// on that p and the summed counts. `show_panels` writes each part.
+fn stratum_parts(
+    category: &str,
+    tier: &str,
+    parts: &[(String, u64, Counts)],
+    plan: &Plan,
+    show_panels: bool,
+) -> StratumOut {
+    let big_n = parts.iter().map(|p| p.1).sum();
+    let mut c = Counts::default();
+    for (_, _, pc) in parts {
+        c.sampled += pc.sampled;
+        c.correct += pc.correct;
+        c.wrong += pc.wrong;
+        c.unsure += pc.unsure;
+    }
+    let panels: Vec<PanelPart> = if show_panels {
+        parts
+            .iter()
+            .map(|(panel, nn, pc)| PanelPart {
+                panel: panel.clone(),
+                big_n: *nn,
+                n: pc.judged(),
+                correct: pc.correct,
+                p: (pc.judged() > 0).then(|| r4(pc.correct as f64 / pc.judged() as f64)),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if parts.len() == 1 {
+        let mut out = stratum_out(category, tier, big_n, c, plan);
+        out.panels = panels;
+        return out;
+    }
+    let rows: Vec<(u64, u64, f64)> = parts
         .iter()
-        .map(|s| {
-            let ph = if s.n > 0 {
-                s.correct as f64 / s.n as f64
+        .map(|(_, nn, pc)| {
+            let n = pc.judged();
+            let ph = if n > 0 {
+                pc.correct as f64 / n as f64
             } else {
                 0.0
             };
-            (s.big_n, s.n, ph)
+            (*nn, n, ph)
         })
         .collect();
+    let mut out = stratum_out(category, tier, big_n, c, plan);
+    let est = stratified_wilson(&rows);
+    out.p = est.map(|e| r4(e.0));
+    out.lo = est.map(|e| r4(e.1));
+    out.hi = est.map(|e| r4(e.2));
+    out.flags.retain(|f| f != "under_floor");
+    if let (Some(f), Some(e)) = (out.floor, est)
+        && e.0 < f
+    {
+        out.flags.insert(0, "under_floor".to_string());
+    }
+    if out.status != "unjudged" && out.status != "insufficient" {
+        out.status = if out.flags.iter().any(|f| f == "under_floor") {
+            "under_floor".to_string()
+        } else {
+            "ok".to_string()
+        };
+    }
+    out.panels = panels;
+    out.parts = rows;
+    out
+}
+
+fn agg(name: &str, strata: &[&StratumOut], ci: CiMethod) -> AggOut {
+    // Every stratum's parts: one per stratum in a one-panel report, one per
+    // (stratum, panel) in a `--panel all` one (HP.5).
+    let rows: Vec<(u64, u64, f64)> = strata.iter().flat_map(|s| s.parts.clone()).collect();
     let est = match ci {
         CiMethod::Plugin => stratified(&rows),
         CiMethod::StratifiedWilson => stratified_wilson(&rows),
@@ -862,6 +967,38 @@ struct AgreementOut {
     /// Disagreements with no adjudication row: their verdict is `unsure`.
     unadjudicated: u64,
     low_agreement: Vec<String>,
+    /// The re-judge pairs by independence (HP.5); left out of a one-panel
+    /// report, so the fit report keeps its bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    independence: Option<IndependenceOut>,
+}
+
+/// The re-judge pairs split by independence (HP.5, `RULE-0.5.7.md`): a pair
+/// is a self pair when one of its re-judge names, less one trailing `r`, is
+/// one of its first judge names (GP.14r / GP.14, HC.3r / HC.3); every other
+/// pair is independent. Kappa over the independent pairs is the rule's.
+#[derive(Debug, Clone, Serialize)]
+struct IndependenceOut {
+    pairs: u64,
+    independent: u64,
+    self_pairs: u64,
+    agree: u64,
+    expected_agreement: Option<f64>,
+    kappa: Option<f64>,
+    status: String,
+    /// Per re-judge name: its pairs and how many are self pairs.
+    by_judge: BTreeMap<String, JudgePairs>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct JudgePairs {
+    pairs: u64,
+    self_pairs: u64,
+}
+
+/// Whether re-judge `second` names the same agent as first judge `first`.
+fn same_agent(first: &str, second: &str) -> bool {
+    second == first || second.strip_suffix('r') == Some(first)
 }
 
 /// What the report counts per id, and the re-judge's agreement (None when no
@@ -1133,6 +1270,25 @@ fn resolve_verdicts_scoped(
             agreement: None,
         });
     }
+    // Each re-judged id's self-ness, by judge names (HP.5).
+    let mut self_ids: BTreeSet<String> = BTreeSet::new();
+    let mut by_judge: BTreeMap<String, JudgePairs> = BTreeMap::new();
+    for (id, per) in &second {
+        let firsts = first.get(id);
+        let is_self = per
+            .keys()
+            .any(|j| firsts.is_some_and(|f| f.keys().any(|fj| same_agent(fj, j))));
+        if is_self {
+            self_ids.insert(id.clone());
+        }
+        for j in per.keys() {
+            let e = by_judge.entry(j.clone()).or_default();
+            e.pairs += 1;
+            if firsts.is_some_and(|f| f.keys().any(|fj| same_agent(fj, j))) {
+                e.self_pairs += 1;
+            }
+        }
+    }
     let second: BTreeMap<String, String> = second
         .iter()
         .map(|(id, per)| (id.clone(), shared(per)))
@@ -1198,6 +1354,22 @@ fn resolve_verdicts_scoped(
     }
     let mut overall = kappa_of("overall", &all_pairs);
     (overall.expected, overall.missing, overall.extra) = (expected, missing, extra);
+    let indep_pairs: Vec<(&str, &str)> = family
+        .keys()
+        .filter(|id| !self_ids.contains(*id))
+        .filter_map(|id| Some((verdicts[id].as_str(), second.get(id)?.as_str())))
+        .collect();
+    let ik = kappa_of("independent", &indep_pairs);
+    let independence = IndependenceOut {
+        pairs: all_pairs.len() as u64,
+        independent: indep_pairs.len() as u64,
+        self_pairs: (all_pairs.len() - indep_pairs.len()) as u64,
+        agree: ik.agree,
+        expected_agreement: ik.expected_agreement,
+        kappa: ik.kappa,
+        status: ik.status,
+        by_judge,
+    };
     let disagreements = all_pairs.iter().filter(|(f, s)| f != s).count() as u64;
     let (mut adjudicated, mut unadjudicated) = (0, 0);
     for (id, s) in &second {
@@ -1234,6 +1406,7 @@ fn resolve_verdicts_scoped(
             adjudicated,
             unadjudicated,
             low_agreement,
+            independence: Some(independence),
         }),
     })
 }
@@ -1245,20 +1418,36 @@ fn build_report(
     plan: &Plan,
     ci: CiMethod,
 ) -> ReportOut {
-    // Pooled stratum sizes and per-repo sizes.
-    let mut pooled: BTreeMap<(String, String), u64> = BTreeMap::new();
+    // Pooled stratum sizes per panel (one panel unless `--panel all`, HP.5)
+    // and per-repo sizes.
+    let panel_name = |h: &Header| h.panel.clone().unwrap_or_else(|| "fit".to_string());
+    let panel_of: BTreeMap<&str, String> = headers
+        .iter()
+        .map(|h| (h.label.as_str(), panel_name(h)))
+        .collect();
+    let panels: BTreeSet<String> = headers.iter().map(panel_name).collect();
+    let multi = panels.len() > 1;
+    let mut pooled: BTreeMap<(String, String), BTreeMap<String, u64>> = BTreeMap::new();
     for h in headers {
         for (s, n) in &h.stratum_sizes {
             let (c, t) = s.split_once('|').unwrap_or((s.as_str(), ""));
-            *pooled.entry((c.to_string(), t.to_string())).or_default() += n;
+            *pooled
+                .entry((c.to_string(), t.to_string()))
+                .or_default()
+                .entry(panel_name(h))
+                .or_default() += n;
         }
     }
-    let mut counts: BTreeMap<(String, String), Counts> = BTreeMap::new();
+    let mut counts: BTreeMap<(String, String, String), Counts> = BTreeMap::new();
     let mut repo_counts: BTreeMap<(String, String, String), Counts> = BTreeMap::new();
     for r in rows {
         let v = verdicts.get(&r.id).map(String::as_str);
+        let panel = panel_of
+            .get(r.label.as_str())
+            .cloned()
+            .unwrap_or_else(|| "fit".to_string());
         counts
-            .entry((r.category.clone(), r.tier.clone()))
+            .entry((r.category.clone(), r.tier.clone(), panel))
             .or_default()
             .add(v);
         repo_counts
@@ -1268,17 +1457,19 @@ fn build_report(
     }
     let strata: Vec<StratumOut> = pooled
         .iter()
-        .map(|((c, t), n)| {
-            stratum_out(
-                c,
-                t,
-                *n,
-                counts
-                    .get(&(c.clone(), t.clone()))
-                    .copied()
-                    .unwrap_or_default(),
-                plan,
-            )
+        .map(|((c, t), by_panel)| {
+            let parts: Vec<(String, u64, Counts)> = by_panel
+                .iter()
+                .map(|(panel, n)| {
+                    let k = (c.clone(), t.clone(), panel.clone());
+                    (
+                        panel.clone(),
+                        *n,
+                        counts.get(&k).copied().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            stratum_parts(c, t, &parts, plan, multi)
         })
         .collect();
     let cats: BTreeSet<&str> = strata.iter().map(|s| s.category.as_str()).collect();
@@ -1344,6 +1535,7 @@ fn build_report(
         floors: plan.floors.clone(),
         seed: plan.seed.clone(),
         ci_method: ci.as_str(),
+        panel: multi.then_some("all"),
         strata,
         categories,
         tiers,
@@ -1480,6 +1672,25 @@ fn agreement_section(md: &mut String, a: &AgreementOut) {
         "\ndisagreements {}, adjudicated {}, unadjudicated {}\n\n",
         a.disagreements, a.adjudicated, a.unadjudicated
     ));
+    if let Some(i) = &a.independence {
+        md.push_str(&format!(
+            "Independence (`RULE-0.5.7.md`): of {} re-judge pairs, {} are self pairs (a re-judge \
+             name less one trailing `r` is the first judge's) and {} independent; the independent \
+             pairs agree on {} (expected agreement {}), kappa {}.\n\n",
+            i.pairs,
+            i.self_pairs,
+            i.independent,
+            i.agree,
+            f3(i.expected_agreement),
+            i.kappa
+                .map_or_else(|| i.status.clone(), |k| format!("{k:.3}"))
+        ));
+        md.push_str("| re-judge | pairs | self pairs |\n|---|---:|---:|\n");
+        for (j, c) in &i.by_judge {
+            md.push_str(&format!("| {j} | {} | {} |\n", c.pairs, c.self_pairs));
+        }
+        md.push('\n');
+    }
     for f in &a.low_agreement {
         md.push_str(&format!(
             "LOW AGREEMENT: `{f}`: its strata's precision is provisional.\n\n"
@@ -1519,11 +1730,39 @@ fn render_md(r: &ReportOut) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    if let Some(panel) = r.panel {
+        md.push_str(&format!(
+            "Panel `{panel}` (HP.5): the fit and the held-out samples, drawn at different n, are \
+             post-stratified: a pooled stratum's p is the stratified estimate over its judged \
+             panel parts (weights N_hg over their N) with that estimate's interval, and a \
+             category's or tier's estimate is stratified over every judged (stratum, panel) part. \
+             A stratum held by one panel reads as that panel's.\n\n"
+        ));
+    }
     if let Some(a) = &r.agreement {
         agreement_section(&mut md, a);
     }
     md.push_str("## Strata (pooled)\n\n");
     strata_table(&mut md, &r.strata);
+    if r.panel.is_some() {
+        md.push_str("\n## Strata by panel\n\n");
+        md.push_str("| category | tier | panel | N | judged | correct | p |\n");
+        md.push_str("|---|---|---|---:|---:|---:|---:|\n");
+        for st in &r.strata {
+            for part in &st.panels {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} | {} |\n",
+                    st.category,
+                    st.tier,
+                    part.panel,
+                    part.big_n,
+                    part.n,
+                    part.correct,
+                    f3(part.p)
+                ));
+            }
+        }
+    }
     md.push_str("\n## Categories\n\n");
     agg_table(&mut md, "category", &r.categories);
     md.push_str("\n## Tiers\n\n");
@@ -1727,6 +1966,7 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
         (None, None, None, None, false);
     let (mut ci, mut rule) = (CiMethod::StratifiedWilson, RejudgeRule::Matched);
     let mut adjudication: Option<String> = None;
+    let mut panel = ReportPanel::All;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -1742,6 +1982,7 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
             "--check" => check = true,
             "--ci" => ci = CiMethod::parse(&value(args, &mut i, flag)?)?,
             "--rejudge-rule" => rule = RejudgeRule::parse(&value(args, &mut i, flag)?)?,
+            "--panel" => panel = ReportPanel::parse(&value(args, &mut i, flag)?)?,
             other => return Err(format!("report: unknown argument {other}")),
         }
         i += 1;
@@ -1772,9 +2013,20 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
         judge,
         ci,
         rule,
+        panel,
     };
     let (report, json, md) = report_texts(inputs, &plan)?;
     eprintln!("{}", report_marker(&report));
+    if Path::new(&plan_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(RULE_057_FILE)
+        .is_file()
+    {
+        for line in rule_057_lines(&report, panel) {
+            eprintln!("{line}");
+        }
+    }
     if let Some(a) = &report.agreement {
         for f in &a.low_agreement {
             eprintln!("[edge-audit] LOW AGREEMENT family={f}: its precision is provisional");
@@ -1808,6 +2060,36 @@ struct ReportInputs {
     judge: Option<String>,
     ci: CiMethod,
     rule: RejudgeRule,
+    /// The panel the report reads (`--panel`, default `all`).
+    panel: ReportPanel,
+}
+
+/// Which panel `report` reads (HP.5): both, post-stratified per panel (`all`,
+/// the default since the 0.5.7 claim reads it), the fit (HC.2's report) or
+/// the held-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportPanel {
+    Fit,
+    Heldout,
+    All,
+}
+
+impl ReportPanel {
+    fn parse(v: &str) -> Result<ReportPanel, String> {
+        match v {
+            "fit" => Ok(ReportPanel::Fit),
+            PANEL_HELDOUT => Ok(ReportPanel::Heldout),
+            "all" => Ok(ReportPanel::All),
+            other => Err(format!("report: --panel `{other}` is not fit|heldout|all")),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            ReportPanel::Fit => "fit",
+            ReportPanel::Heldout => PANEL_HELDOUT,
+            ReportPanel::All => "all",
+        }
+    }
 }
 
 /// The report and its JSON and markdown texts, from the samples, verdicts,
@@ -1824,8 +2106,22 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
     }
     let (headers, rows) = read_samples(&inp.samples)?;
     // The fit report reads the fit panel only (HC.2): held-out samples and
-    // their verdicts may sit beside it, and never enter it.
-    let split = split_panel(headers, rows, None)?;
+    // their verdicts may sit beside it, and never enter it. `--panel all`
+    // reads both (HP.5).
+    let split = match inp.panel {
+        ReportPanel::Fit => split_panel(headers, rows, None)?,
+        ReportPanel::Heldout => split_panel(headers, rows, Some(PANEL_HELDOUT))?,
+        ReportPanel::All => {
+            let fit = split_panel(headers.clone(), rows.clone(), None)?;
+            let held = split_panel(headers, rows, Some(PANEL_HELDOUT))?;
+            PanelSplit {
+                headers: [fit.headers, held.headers].concat(),
+                rows: [fit.rows, held.rows].concat(),
+                scope: fit.scope.union(&held.scope).cloned().collect(),
+                known: fit.known,
+            }
+        }
+    };
     let (headers, rows) = (split.headers, split.rows);
     let adjudication = read_adjudication(&inp.adjudication)?;
     let resolved = resolve_verdicts_scoped(
@@ -1839,6 +2135,11 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
     )?;
     let mut report = build_report(&headers, &rows, &resolved.verdicts, plan, inp.ci);
     report.agreement = resolved.agreement;
+    if report.panel.is_none()
+        && let Some(a) = report.agreement.as_mut()
+    {
+        a.independence = None;
+    }
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n";
     let md = render_md(&report);
     Ok((report, json, md))
@@ -1912,6 +2213,68 @@ fn report_marker(report: &ReportOut) -> String {
             .map_or("-".to_string(), |a| kappa_text(&a.overall)),
         report.ci_method
     )
+}
+
+/// The 0.5.7 proof run's pass rule (HP.5), committed before its sample was
+/// drawn; `report` judges by it when the file sits beside the plan.
+const RULE_057_FILE: &str = "RULE-0.5.7.md";
+/// Rule condition 3: the independent pairs' kappa floor and their minimum count.
+const RULE_057_KAPPA: f64 = 0.80;
+const RULE_057_MIN_PAIRS: u64 = MIN_REJUDGE as u64;
+
+/// `RULE-0.5.7.md`'s verdict over a report: PASS iff `under_floor` is empty,
+/// each tier of the plan's floors has a stratified p at or above its floor,
+/// and the independent re-judge pairs number at least [`RULE_057_MIN_PAIRS`]
+/// with kappa at least [`RULE_057_KAPPA`]. The rule reads `--panel all`; on
+/// another panel only a refusal line is printed.
+fn rule_057_lines(report: &ReportOut, panel: ReportPanel) -> Vec<String> {
+    if panel != ReportPanel::All {
+        return vec![format!(
+            "[edge-audit] rule 0.5.7 not judged: panel {} (the rule reads --panel all)",
+            panel.as_str()
+        )];
+    }
+    let tier_p = |t: &str| {
+        report
+            .tiers
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(t))
+            .and_then(|a| a.p)
+    };
+    let tiers_ok = report
+        .floors
+        .iter()
+        .all(|(t, f)| tier_p(t).is_some_and(|p| p >= *f));
+    let ind = report
+        .agreement
+        .as_ref()
+        .and_then(|a| a.independence.as_ref());
+    let kappa_ok = ind.is_some_and(|i| {
+        i.independent >= RULE_057_MIN_PAIRS && i.kappa.is_some_and(|k| k >= RULE_057_KAPPA)
+    });
+    let pass = report.under_floor.is_empty() && tiers_ok && kappa_ok;
+    let p = |t: &str| f3(tier_p(t));
+    vec![
+        format!(
+            "[edge-audit] rule 0.5.7 verdict={} under_floor={} fact={} derived={} heuristic={} kappa={}",
+            if pass { "PASS" } else { "FAIL" },
+            if report.under_floor.is_empty() {
+                "none".to_string()
+            } else {
+                report.under_floor.join(",")
+            },
+            p("fact"),
+            p("derived"),
+            p("heuristic"),
+            ind.and_then(|i| i.kappa)
+                .map_or("-".to_string(), |k| format!("{k:.3}"))
+        ),
+        format!(
+            "[edge-audit] rule 0.5.7 rejudge independent={} self={}",
+            ind.map_or(0, |i| i.independent),
+            ind.map_or(0, |i| i.self_pairs)
+        ),
+    ]
 }
 
 // ------------------------------------------------------- calibration (HC.2)
@@ -2729,7 +3092,12 @@ fn calibration_texts(inp: CalInputs, plan: &Plan) -> Result<(CalOut, String, Str
         largest_gaps,
         repos,
         sub_strata,
-        agreement: resolved.agreement,
+        // The calibration's agreement is HC.2's: the independence split is the
+        // 0.5.7 proof run's (HP.5) and stays out of calibration.json.
+        agreement: resolved.agreement.map(|a| AgreementOut {
+            independence: None,
+            ..a
+        }),
         name_drift,
         pooled,
     };
@@ -3622,8 +3990,8 @@ mod tests {
         assert_eq!(wilson(27, 30), wilson_p(27.0 / 30.0, 30.0));
     }
 
-    /// The committed FD.3c audit (bench/edge-audit/) read as `report --check`
-    /// reads it, under the given CI method and re-judge rule.
+    /// The committed audit (bench/edge-audit/) read as `report --check` reads
+    /// it (`--panel all` since HP.5), under the given CI method and re-judge rule.
     fn committed(ci: CiMethod, rule: RejudgeRule) -> (ReportOut, String, String) {
         let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
         let all = expand(&ad.join("verdicts/*.jsonl").to_string_lossy()).unwrap();
@@ -3639,6 +4007,8 @@ mod tests {
             judge: None,
             ci,
             rule,
+            // The committed report is the 0.5.7 claim's (HP.5): both panels.
+            panel: ReportPanel::All,
         };
         report_texts(inputs, &plan).unwrap()
     }
@@ -3677,7 +4047,10 @@ mod tests {
             .find(|c| c.name == "CALLS")
             .unwrap();
         assert_eq!((calls.p, calls.hi), (Some(1.0), Some(1.0)));
-        assert_eq!(calls.lo, Some(0.8897));
+        // HP.5: both panels (the fit at the 0.5.7 release candidate, the
+        // held-out as HC.3 judged it), every judged CALLS id correct.
+        assert_eq!(calls.lo, Some(0.817));
+        assert_eq!(report.panel, Some("all"));
         // Every sampled (not census) category reads a lower bound below 1; a
         // census category (INJECTS, GRPC_CALLS, ..) is exact.
         let sampled: Vec<&AggOut> = report.categories.iter().filter(|c| c.n < c.big_n).collect();
@@ -3696,6 +4069,31 @@ mod tests {
         assert_eq!(s.missing, s.missing_ids.len() as u64);
         let m = a.families.iter().find(|k| k.name == "mechanism").unwrap();
         assert_eq!(m.expected, 20);
+        // RULE-0.5.7.md's verdict over the committed report (HP.5): computed,
+        // its kappa over the independent pairs only.
+        let ind = a.independence.as_ref().unwrap();
+        assert_eq!(ind.by_judge["HP.5x"].self_pairs, 0);
+        assert_eq!(
+            ind.by_judge["HC.3r"].self_pairs,
+            ind.by_judge["HC.3r"].pairs
+        );
+        let report = ReportOut {
+            agreement: Some(a),
+            ..report
+        };
+        let lines = rule_057_lines(&report, ReportPanel::All);
+        assert!(
+            lines[0].starts_with(
+                "[edge-audit] rule 0.5.7 verdict=FAIL under_floor=ACCESSES_DATA|fact,"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with(" kappa=1.000"), "{}", lines[0]);
+        assert_eq!(
+            lines[1],
+            "[edge-audit] rule 0.5.7 rejudge independent=44 self=59"
+        );
     }
 
     // ------------------------------------------------- calibration (HC.2)
@@ -4101,12 +4499,55 @@ mod tests {
                 judge: None,
                 ci: CiMethod::StratifiedWilson,
                 rule: RejudgeRule::Matched,
+                panel: ReportPanel::Fit,
             },
             &plan(),
         )
         .unwrap();
         assert_eq!(fit_only.repos.keys().collect::<Vec<_>>(), vec!["fit"]);
         assert_eq!(fit_only.strata.iter().map(|s| s.n).sum::<u64>(), 192);
+        assert!(fit_only.panel.is_none());
+        assert!(fit_only.strata.iter().all(|s| s.panels.is_empty()));
+
+        // `--panel all` (HP.5): both panels, post-stratified per panel.
+        let (first, second) =
+            split_rejudge(expand(&d.join("verdicts/*.jsonl").to_string_lossy()).unwrap());
+        let (all, all_json, all_md) = report_texts(
+            ReportInputs {
+                samples: expand(&d.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+                verdicts: first,
+                rejudge: second,
+                adjudication: d.join(ADJUDICATION_FILE),
+                judge: None,
+                ci: CiMethod::StratifiedWilson,
+                rule: RejudgeRule::Matched,
+                panel: ReportPanel::All,
+            },
+            &plan(),
+        )
+        .unwrap();
+        assert_eq!(all.panel, Some("all"));
+        assert_eq!(all.repos.keys().collect::<Vec<_>>(), vec!["fit", "held"]);
+        let held_n: u64 = all.repos["held"].strata.iter().map(|s| s.n).sum();
+        assert!(held_n > 0);
+        assert_eq!(all.strata.iter().map(|s| s.n).sum::<u64>(), 192 + held_n);
+        let two: Vec<&StratumOut> = all.strata.iter().filter(|s| s.panels.len() == 2).collect();
+        assert!(!two.is_empty());
+        for st in &two {
+            // p is the N-weighted mean of the judged parts, never the pooled
+            // correct / judged of samples drawn at different n.
+            let judged: Vec<&PanelPart> = st.panels.iter().filter(|p| p.n > 0).collect();
+            let total: u64 = judged.iter().map(|p| p.big_n).sum();
+            let want: f64 = judged
+                .iter()
+                .map(|p| p.big_n as f64 / total as f64 * p.correct as f64 / p.n as f64)
+                .sum();
+            assert_eq!(st.p, Some(r4(want)), "{}|{}", st.category, st.tier);
+            assert_eq!(st.parts.len(), 2);
+        }
+        assert!(all_json.contains("\"panel\": \"all\""));
+        assert!(all_json.contains("\"panels\": ["));
+        assert!(all_md.contains("## Strata by panel"));
 
         // Fit samples that do not reproduce the fit report are refused.
         std::fs::write(
@@ -4122,11 +4563,139 @@ mod tests {
     }
 
     #[test]
+    fn rule_057_reads_both_panels_and_only_independent_pairs() {
+        assert!(same_agent("GP.14", "GP.14r") && same_agent("HC.3", "HC.3"));
+        assert!(!same_agent("FD.3a", "FD.3c") && !same_agent("HP.5", "HP.5x"));
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mut fit_rows = Vec::new();
+        let (mut fit_v, mut indep) = (String::new(), String::new());
+        for (t, tier) in ["fact", "derived", "heuristic"].iter().enumerate() {
+            for i in 0..30 {
+                let id = format!("{:014x}{t}{}", i, 0);
+                let v = if *tier == "heuristic" && i < 3 {
+                    "wrong"
+                } else {
+                    "correct"
+                };
+                fit_rows.push(sample_row(&id, "fit", "CALLS", tier, "r"));
+                fit_v.push_str(&verdict_line(&id, v, "A"));
+                indep.push_str(&verdict_line(&id, v, "X"));
+            }
+        }
+        let held_rows: Vec<SampleRow> = (0..10)
+            .map(|i| sample_row(&format!("{i:015x}f"), "held", "CALLS", "fact", "r"))
+            .collect();
+        let held_v: String = held_rows
+            .iter()
+            .map(|r| verdict_line(&r.id, "correct", "B"))
+            .collect();
+        let held_self: String = held_rows
+            .iter()
+            .map(|r| verdict_line(&r.id, "correct", "Br"))
+            .collect();
+        let sizes = [
+            ("CALLS|fact", 300),
+            ("CALLS|derived", 300),
+            ("CALLS|heuristic", 300),
+        ];
+        std::fs::write(
+            d.join("audit.jsonl"),
+            jsonl(&[header("fit", &sizes, None)]) + &jsonl(&fit_rows),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("heldout.jsonl"),
+            jsonl(&[header("held", &[("CALLS|fact", 100)], Some(PANEL_HELDOUT))])
+                + &jsonl(&held_rows),
+        )
+        .unwrap();
+        std::fs::write(d.join("fit.jsonl"), fit_v).unwrap();
+        std::fs::write(d.join("held.jsonl"), held_v).unwrap();
+        let plan = Plan::read(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../bench/edge-audit/floors.json")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        let run = |rejudge: &str| {
+            std::fs::write(d.join(REJUDGE_FILE), rejudge).unwrap();
+            report_texts(
+                ReportInputs {
+                    samples: vec![d.join("audit.jsonl"), d.join("heldout.jsonl")],
+                    verdicts: vec![d.join("fit.jsonl"), d.join("held.jsonl")],
+                    rejudge: vec![d.join(REJUDGE_FILE)],
+                    adjudication: d.join(ADJUDICATION_FILE),
+                    judge: None,
+                    ci: CiMethod::StratifiedWilson,
+                    rule: RejudgeRule::Matched,
+                    panel: ReportPanel::All,
+                },
+                &plan,
+            )
+            .unwrap()
+            .0
+        };
+        let report = run(&(indep.clone() + &held_self));
+        let lines = rule_057_lines(&report, ReportPanel::All);
+        assert_eq!(
+            lines,
+            vec![
+                "[edge-audit] rule 0.5.7 verdict=PASS under_floor=none fact=1.000 derived=1.000 \
+                 heuristic=0.900 kappa=1.000"
+                    .to_string(),
+                "[edge-audit] rule 0.5.7 rejudge independent=90 self=10".to_string(),
+            ]
+        );
+        let ind = report
+            .agreement
+            .as_ref()
+            .unwrap()
+            .independence
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (ind.by_judge["Br"].self_pairs, ind.by_judge["X"].self_pairs),
+            (10, 0)
+        );
+        // Self pairs alone never satisfy the rule's kappa.
+        let report = run(&held_self);
+        assert_eq!(
+            rule_057_lines(&report, ReportPanel::All)[0],
+            "[edge-audit] rule 0.5.7 verdict=FAIL under_floor=none fact=1.000 derived=1.000 \
+             heuristic=0.900 kappa=-"
+        );
+        // Another panel is refused, never judged.
+        assert_eq!(
+            rule_057_lines(&report, ReportPanel::Fit),
+            vec!["[edge-audit] rule 0.5.7 not judged: panel fit (the rule reads --panel all)"]
+        );
+    }
+
+    #[test]
     fn committed_fit_report_ignores_a_held_out_panel_beside_it() {
         // The committed samples and verdicts plus a held-out samples file, its
         // first verdicts and re-judge rows: the fit report is byte for byte
-        // the committed one.
+        // the fit report of the committed files alone.
         let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
+        let plan = Plan::read(&ad.join("floors.json").to_string_lossy()).unwrap();
+        let (base_first, base_second) =
+            split_rejudge(expand(&ad.join("verdicts/*.jsonl").to_string_lossy()).unwrap());
+        let (_, base_json, base_md) = report_texts(
+            ReportInputs {
+                samples: expand(&ad.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+                verdicts: base_first,
+                rejudge: base_second,
+                adjudication: ad.join(ADJUDICATION_FILE),
+                judge: None,
+                ci: CiMethod::StratifiedWilson,
+                rule: RejudgeRule::Matched,
+                panel: ReportPanel::Fit,
+            },
+            &plan,
+        )
+        .unwrap();
+        assert!(!base_json.contains("\"panel\""));
         let dir = tempfile::tempdir().unwrap();
         let held = dir.path().join("heldout.jsonl");
         std::fs::write(
@@ -4146,7 +4715,6 @@ mod tests {
         verdicts.push(hv);
         let mut samples = expand(&ad.join("samples/*.jsonl").to_string_lossy()).unwrap();
         samples.push(held);
-        let plan = Plan::read(&ad.join("floors.json").to_string_lossy()).unwrap();
         let (_, json, md) = report_texts(
             ReportInputs {
                 samples,
@@ -4156,11 +4724,12 @@ mod tests {
                 judge: None,
                 ci: CiMethod::StratifiedWilson,
                 rule: RejudgeRule::Matched,
+                panel: ReportPanel::Fit,
             },
             &plan,
         )
         .unwrap();
-        assert!(json == std::fs::read_to_string(ad.join("report.json")).unwrap());
-        assert!(md == std::fs::read_to_string(ad.join("report.md")).unwrap());
+        assert!(json == base_json);
+        assert!(md == base_md);
     }
 }

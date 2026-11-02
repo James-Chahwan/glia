@@ -6,7 +6,6 @@
 {"id": "00f1bad673f9faef", "verdict": "correct", "reason": "the android build.gradle buildscript declares classpath org.jetbrains.kotlin:kotlin-gradle-plugin", "judge": "FD.3b"}
 {"id": "00f75faa72d4d381", "verdict": "correct", "reason": "the helm template's container `env:` list declares this name", "judge": "FD.3b"}
 {"id": "010906133778fbcb", "verdict": "correct", "reason": "the Deployment's container `env:` list declares this name", "judge": "FD.3b"}
-{"id": "0119d378b30ca5dc", "verdict": "correct", "reason": "the section names `resolve_frame` and its `line_1based - 1` conversion, this method", "judge": "FD.3b"}
 {"id": "016485aa5e8ea6d3", "verdict": "correct", "reason": "requirements.txt pins this package (pip-compile output)", "judge": "FD.3b"}
 {"id": "01a6721b821f04d8", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
 {"id": "01ec718e5c9a2e4c", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
@@ -109,11 +108,8 @@
 {"id": "aa2be67bf09f2cae", "verdict": "correct", "reason": "NewCurrencyServiceClient(..) calls Convert / GetSupportedCurrencies: hipstershop.CurrencyService, served by currencyservice", "judge": "FD.3b"}
 {"id": "aa7a24fee3f57ead", "verdict": "correct", "reason": "NewPaymentServiceClient(..).Charge: hipstershop.PaymentService, served by paymentservice", "judge": "FD.3b"}
 {"id": "aaf52016ec93c01d", "verdict": "correct", "reason": "ProductCatalogServiceStub on PRODUCT_CATALOG_SERVICE_ADDR, used by ListRecommendations: hipstershop.ProductCatalogService", "judge": "FD.3b"}
-{"id": "abe1e82991ae3b08", "verdict": "correct", "reason": "the service registers grpc.health.v1.Health (RegisterHealthServer with grpc's health.NewServer())", "judge": "FD.3b"}
 {"id": "b26eae56564018f7", "verdict": "correct", "reason": "NewShippingServiceClient(..).GetQuote: hipstershop.ShippingService, served by shippingservice", "judge": "FD.3b"}
 {"id": "b48399ef14d788f2", "verdict": "correct", "reason": "list reads Firestore collection('entries') under the category doc via .get()", "judge": "FD.3b"}
-{"id": "b6d2d936fda51195", "verdict": "correct", "reason": "checkoutservice RegisterCheckoutServiceServer(srv, svc)", "judge": "FD.3b"}
-{"id": "becdc079bd98cee0", "verdict": "correct", "reason": "email_server.start registers the servicer with add_HealthServicer_to_server", "judge": "FD.3b"}
 {"id": "d18b326bdcbe3091", "verdict": "correct", "reason": "SpannerCartStore names TableName = \"CartItems\" and queries / writes that table (a Spanner SQL table; the nosql flavour label is off, the entity is right)", "judge": "FD.3b"}
 {"id": "e5b213e0c3e09571", "verdict": "correct", "reason": "NewCurrencyServiceClient(..) calls Convert / GetSupportedCurrencies: hipstershop.CurrencyService, served by currencyservice", "judge": "FD.3b"}
 {"id": "e680e26393fd4366", "verdict": "correct", "reason": "NewProductCatalogServiceClient(..) calls GetProduct / ListProducts: hipstershop.ProductCatalogService, served by productcatalogservice", "judge": "FD.3b"}
@@ -122,45 +118,23 @@
 {"id": "f2d2028aa2359beb", "verdict": "correct", "reason": "NewProductCatalogServiceClient(..) calls GetProduct / ListProducts: hipstershop.ProductCatalogService, served by productcatalogservice", "judge": "FD.3b"}
 {"id": "f6eb23b27c604707", "verdict": "correct", "reason": "subscribe reads Firestore collection('entries') under the category doc via .snapshots()", "judge": "FD.3b"}
 {"id": "fe859fe3ef4b7a5c", "verdict": "correct", "reason": "the bufferpool client dials ws://<addr>/ws; ws:ws inherits /ws from bufferpool/server.go's HandleFunc(\"/ws\", handler), which upgrades, and the default addrs agree", "judge": "FD.3b"}
-{"id": "000ad1cdfb07be45", "verdict": "correct", "reason": "gate_trim_main reads std::env::var(\"GLIA_RANK_GATE_HEAD\")", "judge": "GP.14"}
-{"id": "008abd88854e4b35", "verdict": "correct", "reason": "the section names glia_graph::build_dart as DT.5h's addition; the same function", "judge": "GP.14"}
-{"id": "01630801666e6cf3", "verdict": "wrong", "reason": "the section's name_breaks is review_vs_rev's dict key, not the engine fn contract_breaks::names::name_breaks", "judge": "GP.14"}
-{"id": "022657a4792ea7fc", "verdict": "correct", "reason": "the Format Spec section states FORMAT_VERSION 3, the store container constant", "judge": "GP.14"}
-{"id": "02ff46d73f27c855", "verdict": "wrong", "reason": "the mention is the removed Python method resolve_signal, not graph's MergedGraph::resolve_signal", "judge": "GP.14"}
 {"id": "03146a515ad52aa0", "verdict": "correct", "reason": "the layout names code-domain lib.rs's ImportBinding reader type, this struct", "judge": "GP.14"}
-{"id": "03eee4fe5cefebb0", "verdict": "correct", "reason": "the section names algo::reach's bfs_levels (DA.1), this function", "judge": "GP.14"}
 {"id": "041e90079ad6aaa3", "verdict": "correct", "reason": "web_dashboard pubspec dependencies: lists google_sign_in ^6.0.0", "judge": "GP.14"}
-{"id": "0454588ea1ad0b29", "verdict": "wrong", "reason": "forbid_edge here is the [[constraint]] kind an overlay candidate holds, not check.rs's private fn", "judge": "GP.14"}
-{"id": "0483a8463dfbff47", "verdict": "correct", "reason": "the section describes WatchSession.snapshot() sharing the session's indexes, this pymethod", "judge": "GP.14"}
-{"id": "04ea2b4141dcc2eb", "verdict": "correct", "reason": "the section names the overlay_try Python function, this pyfunction", "judge": "GP.14"}
 {"id": "04ec41afc40b5d4c", "verdict": "correct", "reason": "game_template pubspec dependencies: lists provider ^6.0.2", "judge": "GP.14"}
 {"id": "052f6a129fe9c880", "verdict": "correct", "reason": "main.go registers /setCurrency POST to svc.setCurrencyHandler", "judge": "GP.14"}
-{"id": "057a795fd3eee5a8", "verdict": "correct", "reason": "step 6 says to wire a new language into detect_language, this function", "judge": "GP.14"}
-{"id": "0585caca698e6ec6", "verdict": "correct", "reason": "the 0.5.0 answers list names spec_status, the PyGraph method", "judge": "GP.14"}
 {"id": "05cb24f60ae03d20", "verdict": "correct", "reason": "the [[bin]] synth_pr_hint has no path, so Cargo builds src/bin/synth_pr_hint.rs, whose main this is", "judge": "GP.14"}
 {"id": "068bc3335be1fb4e", "verdict": "correct", "reason": "parsers/code/clojure/Cargo.toml depends on tree-sitter-clojure-orchard 0.2", "judge": "GP.14"}
 {"id": "07e6a27eb2707d4c", "verdict": "correct", "reason": "parsers/code/solidity/Cargo.toml depends on tree-sitter-solidity 1.2", "judge": "GP.14"}
 {"id": "0812d5f6c6cb3722", "verdict": "correct", "reason": "parsers/code/python/Cargo.toml depends on glia-code-domain by path", "judge": "GP.14"}
 {"id": "08e35350fa062e01", "verdict": "correct", "reason": "the section explains CatalogModel being provided and feeding CartModel; it is this sample's own class", "judge": "GP.14"}
 {"id": "0910b971d87c85eb", "verdict": "correct", "reason": "locust posts /cart/checkout to the frontend, which routes POST /cart/checkout", "judge": "GP.14"}
-{"id": "098b100617f66563", "verdict": "correct", "reason": "the [ids] section names glia_engine::intent::ids::IdVocab as the reader", "judge": "GP.14"}
-{"id": "09e9f2048c224b0d", "verdict": "correct", "reason": "the history names the FactSource seam (DA.6), this trait", "judge": "GP.14"}
 {"id": "0a490511adbef83b", "verdict": "correct", "reason": "the driver_utils API section lists write_json, this driver_utils function", "judge": "GP.14"}
 {"id": "0ac85006b1e2709a", "verdict": "correct", "reason": "the [[bin]] synth_directive has no path, so Cargo builds src/bin/synth_directive.rs, whose main this is", "judge": "GP.14"}
 {"id": "0b0dec22726019e4", "verdict": "correct", "reason": "main.go registers /cart GET,HEAD to svc.viewCartHandler", "judge": "GP.14"}
-{"id": "0b4fa2499bd022ea", "verdict": "correct", "reason": "the section names MergedGraph::tie_cmp as the tie-break, this method", "judge": "GP.14"}
-{"id": "0ba526d126eca6f2", "verdict": "correct", "reason": "the section says resolve_calls / resolve_refs run pooled, this graph calls.rs fn", "judge": "GP.14"}
 {"id": "0baf1fdb23ae59aa", "verdict": "correct", "reason": "the resolver table lists SharedSchemaResolver, this struct", "judge": "GP.14"}
-{"id": "0bd85a441cfc5ffa", "verdict": "wrong", "reason": "empty_scopes here is a key of the try report's rule dict, not trial.rs's fn", "judge": "GP.14"}
-{"id": "0c06c126ce95da71", "verdict": "wrong", "reason": "abi_ref here is an evm ENDPOINT_HIT cell key, not the evm/ts.rs fn abi_ref", "judge": "GP.14"}
-{"id": "0c4d08dd2adbe0d0", "verdict": "wrong", "reason": "receiver_return here is the TS CALLS rule name, not the C++ CppScope::receiver_return method", "judge": "GP.14"}
-{"id": "0d9155e9a77a3215", "verdict": "wrong", "reason": "the py README's review_vs_rev is the glia_py function, not the engine's review::review_vs_rev", "judge": "GP.14"}
 {"id": "0e6e233d7f30ebe1", "verdict": "correct", "reason": "main.go registers /cart POST to svc.addToCartHandler", "judge": "GP.14"}
-{"id": "0e99a0c6357d74fb", "verdict": "correct", "reason": "the 0.5.0 answers list names graph_delta, the glia_py module function", "judge": "GP.14"}
-{"id": "0ef9a0eda01a0272", "verdict": "correct", "reason": "the section says a RankCache is kept one per WatchSession, the engine struct", "judge": "GP.14"}
 {"id": "0fe2a34bf981c609", "verdict": "correct", "reason": "the DPG section names CODE_TABLES in code-domain/src/profile.rs", "judge": "GP.14"}
 {"id": "10493d176d7b2989", "verdict": "correct", "reason": "the LD.9 section names BlastAnswer's compile_fail doctest; this struct", "judge": "GP.14"}
-{"id": "1162092305689606", "verdict": "correct", "reason": "the Visualization Layer section holds the ### TextEditingDeltaView subsection describing this widget", "judge": "GP.14"}
 {"id": "1eb305348b789c76", "verdict": "correct", "reason": "cohort_health reads std::env::var(\"GLIA_HEALTH_REPOS\")", "judge": "GP.14"}
 {"id": "20a9769b5dfbefd9", "verdict": "correct", "reason": "emailservice Dockerfile sets ENV PYTHONDONTWRITEBYTECODE=1", "judge": "GP.14"}
 {"id": "236d26ce36f849a1", "verdict": "correct", "reason": "the [[bin]] synth_derived_notes has no path, so Cargo builds src/bin/synth_derived_notes.rs, whose main this is", "judge": "GP.14"}
@@ -177,17 +151,11 @@
 {"id": "34217dc0f6bf7779", "verdict": "correct", "reason": "index.js reads process.env['PORT']", "judge": "GP.14"}
 {"id": "357022affab1d079", "verdict": "correct", "reason": "start() reads os.environ.get('PORT', \"8080\")", "judge": "GP.14"}
 {"id": "37ca89b9f745b5c6", "verdict": "correct", "reason": "the [[bin]] synth_reachable_paths has no path, so Cargo builds src/bin/synth_reachable_paths.rs, whose main this is", "judge": "GP.14"}
-{"id": "38b256aca93cedfb", "verdict": "correct", "reason": "bench_quiet_poll reads std::env::var(\"GLIA_WATCH_POLL_BENCH\")", "judge": "GP.14"}
 {"id": "3ebcae2a7d1a57f4", "verdict": "correct", "reason": "main.go registers /assistant GET to svc.assistantHandler", "judge": "GP.14"}
 {"id": "426683aafdc913a4", "verdict": "correct", "reason": "main.go registers /product/{id} GET to svc.productHandler", "judge": "GP.14"}
 {"id": "43ca9c3361cdb095", "verdict": "correct", "reason": "locust gets /logout on the frontend, which routes GET /logout", "judge": "GP.14"}
 {"id": "448fd4a4b47b362a", "verdict": "correct", "reason": "the [[bin]] synth_validator has no path, so Cargo builds src/bin/synth_validator.rs, whose main this is", "judge": "GP.14"}
-{"id": "44e8123d63a82f68", "verdict": "correct", "reason": "KNs::build reads std::env::var(\"GLIA_NS_DEBUG\")", "judge": "GP.14"}
 {"id": "45106c8f3fc178d2", "verdict": "correct", "reason": "main.go registers /product/{id} HEAD to svc.productHandler", "judge": "GP.14"}
-{"id": "45742edae51aa50f", "verdict": "correct", "reason": "dart_debug_enabled reads std::env::var(\"GLIA_DART_DEBUG\")", "judge": "GP.14"}
-{"id": "4962377ead2f60a2", "verdict": "correct", "reason": "event_debug reads std::env::var(\"GLIA_EVENT_DEBUG\")", "judge": "GP.14"}
-{"id": "49c2d2f418ca9339", "verdict": "correct", "reason": "threads() reads std::env::var(\"GLIA_THREADS\")", "judge": "GP.14"}
-{"id": "49e77a56d48777fb", "verdict": "correct", "reason": "r2_build reads std::env::var(\"GLIA_R2_DUMP\")", "judge": "GP.14"}
 {"id": "4ad39d981f5767c7", "verdict": "correct", "reason": "start() registers DummyEmailService as the EmailService servicer; its SendOrderConfirmation runs", "judge": "GP.14"}
 {"id": "4de3f0eacbd4f470", "verdict": "correct", "reason": "the [[bin]] synth_prose_mention has no path, so Cargo builds src/bin/synth_prose_mention.rs, whose main this is", "judge": "GP.14"}
 {"id": "4faae4a613ff7e29", "verdict": "correct", "reason": "the [[bin]] synth_plan has no path, so Cargo builds src/bin/synth_plan.rs, whose main this is", "judge": "GP.14"}
@@ -203,12 +171,43 @@
 {"id": "84f4c2d4460c9344", "verdict": "correct", "reason": "cli/Cargo.toml [[bin]] glia has path src/main.rs, whose main this is", "judge": "GP.14"}
 {"id": "872415f587709497", "verdict": "correct", "reason": "the [[bin]] synth_traceback_target has no path, so Cargo builds src/bin/synth_traceback_target.rs, whose main this is", "judge": "GP.14"}
 {"id": "8944257ee58feac5", "verdict": "correct", "reason": "main.go registers /cart/checkout POST to svc.placeOrderHandler", "judge": "GP.14"}
-{"id": "8a418e452ff76cae", "verdict": "correct", "reason": "the [[bin]] node_summaries has no path, so Cargo builds src/bin/node_summaries.rs, whose main this is", "judge": "GP.14"}
-{"id": "8ce9358306857407", "verdict": "correct", "reason": "the [[bin]] synth_runtime_type has no path, so Cargo builds src/bin/synth_runtime_type.rs, whose main this is", "judge": "GP.14"}
 {"id": "8ed8afe29cb8ab40", "verdict": "correct", "reason": "locust posts /cart/empty on the frontend, which routes POST /cart/empty", "judge": "GP.14"}
 {"id": "a1728cf3304c0728", "verdict": "correct", "reason": "locust gets /cart on the frontend, which routes GET /cart", "judge": "GP.14"}
 {"id": "a18c405b9705fbe3", "verdict": "correct", "reason": "locust posts /setCurrency on the frontend, which routes POST /setCurrency", "judge": "GP.14"}
-{"id": "a420f17ad0223bee", "verdict": "correct", "reason": "embed/Cargo.toml [[bin]] glia-embed-worker has path src/bin/glia-embed-worker.rs, whose main this is", "judge": "GP.14"}
-{"id": "a6194887876b42ae", "verdict": "wrong", "reason": "the section's only Tab is the Alt + Tab key in prose, not the stack.ts Tab interface", "judge": "GP.14"}
 {"id": "d2ed9d050374352d", "verdict": "correct", "reason": "locust gets / on the frontend, which routes GET /", "judge": "GP.14"}
 {"id": "e1254b7c7552431c", "verdict": "correct", "reason": "the section names parseCatalog as the function the reload bug makes slow; same function", "judge": "GP.14"}
+{"id": "2d345116a7d4f376", "verdict": "correct", "reason": "WORKDIR /recommendationservice, COPY . ., ENTRYPOINT python recommendation_server.py runs that module", "judge": "HP.5"}
+{"id": "326a432ea155df8a", "verdict": "correct", "reason": "WORKDIR /usr/src/app, COPY . ., ENTRYPOINT node index.js runs paymentservice/index.js", "judge": "HP.5"}
+{"id": "5acbc98433a8fb1d", "verdict": "correct", "reason": "the builder go-builds the shippingservice package to /src/shippingservice, the ENTRYPOINT; its main is main.go's main", "judge": "HP.5"}
+{"id": "5b517beba3f42bd0", "verdict": "correct", "reason": "the builder go-builds the frontend package and copies it to /src/server, the ENTRYPOINT; its main is main.go's main", "judge": "HP.5"}
+{"id": "6372bc8dbdfeb0b0", "verdict": "correct", "reason": "WORKDIR /shoppingassistantservice, COPY . ., ENTRYPOINT python shoppingassistantservice.py runs that module", "judge": "HP.5"}
+{"id": "72b792b3b6e0fa93", "verdict": "correct", "reason": "WORKDIR /usr/src/app, COPY . ., ENTRYPOINT node server.js runs currencyservice/server.js", "judge": "HP.5"}
+{"id": "00d3fa0b7614e4cc", "verdict": "wrong", "reason": "the section's `set_cell` is pyo3's PyGraph.set_cell beside write_cell (a cell writer), not the store crate's internal container::set_cell", "judge": "HP.5"}
+{"id": "01ba6a8e7545b6f9", "verdict": "correct", "reason": "the section names `parallel::threads` as the function documenting the pool-size table", "judge": "HP.5"}
+{"id": "043bd749d7b26982", "verdict": "correct", "reason": "the section describes the INVOKED_MEMBERS table and its rows", "judge": "HP.5"}
+{"id": "05668e582e8e56d7", "verdict": "correct", "reason": "the section names `code_domain::same_as::evidence_rule` as SAME_AS's rule reader", "judge": "HP.5"}
+{"id": "06137bd493510669", "verdict": "correct", "reason": "the Python README's 0.5.1 section lists `duplicate_flows` among the PyGraph methods", "judge": "HP.5"}
+{"id": "063541ae2caf79d0", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "07e665a144fedaa8", "verdict": "correct", "reason": "the section names CODE_PROFILE, the engine's wrap of CODE_TABLES with the passes", "judge": "HP.5"}
+{"id": "08b9c08ffa64c172", "verdict": "correct", "reason": "the section describes `trace::concept_flows`", "judge": "HP.5"}
+{"id": "090811fe5464a116", "verdict": "correct", "reason": "the history lists LD.6's `entry_kinds()`, the engine's entry-kind list", "judge": "HP.5"}
+{"id": "097ee5301678d64f", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "09d929651ab2d270", "verdict": "correct", "reason": "the section says the walk's Cargo packages feed rust_paths as `RustCrate`s", "judge": "HP.5"}
+{"id": "0a789600990ddd8d", "verdict": "wrong", "reason": "`text_hash` is a vectors.jsonl row field (a key in the field table), not the engine's text_hash function", "judge": "HP.5"}
+{"id": "0bf60e2e3ec1ef1d", "verdict": "correct", "reason": "the Python README section lists the PyGraph method `entry_flows`", "judge": "HP.5"}
+{"id": "0c80decc6f17d22c", "verdict": "correct", "reason": "the Python README section lists the traversal method `reachable_by`", "judge": "HP.5"}
+{"id": "0c83d9305e8b4ef2", "verdict": "wrong", "reason": "`.Use` is Go's router-group `.Use(mw)` chaining (GD.28), not contract_breaks::names::Use", "judge": "HP.5"}
+{"id": "0ccfda168c9cbe60", "verdict": "correct", "reason": "the section names `same_as::ALL_RULES`, the identity rule names", "judge": "HP.5"}
+{"id": "0ee0f155669e330f", "verdict": "correct", "reason": "the section names `WatchSession::open_many` for multi-repo watch", "judge": "HP.5"}
+{"id": "0efa5d32197f6b9d", "verdict": "correct", "reason": "the overlay doc names `PyGraph.check()` reading each repo's overlay", "judge": "HP.5"}
+{"id": "0f4700ef04db50be", "verdict": "correct", "reason": "the section tells a contributor to implement CrossGraphResolver", "judge": "HP.5"}
+{"id": "101d00685ac2fc2b", "verdict": "wrong", "reason": "`done()` is a Datalog example of a 0-arity atom in the rules dialect, not IdDefs::done", "judge": "HP.5"}
+{"id": "120ac0f4565c3a2d", "verdict": "correct", "reason": "the section names `glia_engine::delta::graph_delta_vs_rev` as a module-path slot", "judge": "HP.5"}
+{"id": "1300cda721c3f37c", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "13440a7b7f25da14", "verdict": "correct", "reason": "the section names `glia_activation::profile::Tier`, the one tier type", "judge": "HP.5"}
+{"id": "139b5a648218313c", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "13e5eff599bb516b", "verdict": "correct", "reason": "the Python README section lists the PyGraph method `entry_flows`", "judge": "HP.5"}
+{"id": "14a6a52f32e3b73c", "verdict": "wrong", "reason": "`ppr_index` names the activation module (EA.1's PprIndex slot and its lib.rs lines), not RankCache::ppr_index", "judge": "HP.5"}
+{"id": "1cc4377c8211739b", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "2b9578542f74b64f", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}
+{"id": "2ea6937b598f706b", "verdict": "correct", "reason": "the site reads the variable with std::env::var", "judge": "HP.5"}

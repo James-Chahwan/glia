@@ -6,45 +6,273 @@
   },
   "seed": "glia-edge-audit-0.5.4",
   "ci_method": "stratified_wilson",
+  "panel": "all",
   "strata": [
     {
       "category": "ACCESSES_DATA",
       "tier": "fact",
-      "N": 5,
-      "sampled": 5,
+      "N": 3575,
+      "sampled": 15,
       "pending": 0,
-      "n": 5,
-      "correct": 5,
+      "n": 15,
+      "correct": 12,
+      "wrong": 3,
+      "unsure": 0,
+      "p": 0.7004,
+      "lo": 0.3978,
+      "hi": 0.8922,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 5,
+          "n": 5,
+          "correct": 5,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 3570,
+          "n": 10,
+          "correct": 7,
+          "p": 0.7
+        }
+      ]
+    },
+    {
+      "category": "CALLS",
+      "tier": "derived",
+      "N": 6,
+      "sampled": 6,
+      "pending": 0,
+      "n": 6,
+      "correct": 6,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.5655,
+      "lo": 0.6097,
       "hi": 1.0,
-      "floor": 0.95,
+      "floor": 0.9,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 6,
+          "n": 6,
+          "correct": 6,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "CALLS",
       "tier": "fact",
-      "N": 103531,
-      "sampled": 31,
+      "N": 196085,
+      "sampled": 41,
       "pending": 0,
-      "n": 31,
-      "correct": 31,
+      "n": 41,
+      "correct": 41,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.8897,
+      "lo": 0.817,
       "hi": 1.0,
       "floor": 0.95,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 110765,
+          "n": 31,
+          "correct": 31,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 85320,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "CONTAINS",
       "tier": "fact",
-      "N": 443,
+      "N": 3891,
+      "sampled": 23,
+      "pending": 0,
+      "n": 23,
+      "correct": 22,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9323,
+      "lo": 0.7004,
+      "hi": 0.9878,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 469,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 3422,
+          "n": 13,
+          "correct": 12,
+          "p": 0.9231
+        }
+      ]
+    },
+    {
+      "category": "DEFINES",
+      "tier": "fact",
+      "N": 145911,
+      "sampled": 21,
+      "pending": 0,
+      "n": 21,
+      "correct": 21,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7292,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 52489,
+          "n": 11,
+          "correct": 11,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 93422,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "DEFINES_CONFIG",
+      "tier": "fact",
+      "N": 884,
+      "sampled": 41,
+      "pending": 0,
+      "n": 41,
+      "correct": 41,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7685,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 166,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 718,
+          "n": 11,
+          "correct": 11,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "DEPENDS_ON",
+      "tier": "fact",
+      "N": 3802,
+      "sampled": 40,
+      "pending": 0,
+      "n": 40,
+      "correct": 40,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7754,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 1228,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 2574,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "DOCUMENTS",
+      "tier": "derived",
+      "N": 1173,
+      "sampled": 40,
+      "pending": 0,
+      "n": 40,
+      "correct": 35,
+      "wrong": 5,
+      "unsure": 0,
+      "p": 0.9419,
+      "lo": 0.8796,
+      "hi": 0.9729,
+      "floor": 0.9,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 409,
+          "n": 30,
+          "correct": 25,
+          "p": 0.8333
+        },
+        {
+          "panel": "heldout",
+          "N": 764,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "EVENT_FLOWS",
+      "tier": "derived",
+      "N": 14,
       "sampled": 10,
       "pending": 0,
       "n": 10,
@@ -54,78 +282,73 @@
       "p": 1.0,
       "lo": 0.7225,
       "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "DEFINES",
-      "tier": "fact",
-      "N": 50145,
-      "sampled": 12,
-      "pending": 0,
-      "n": 12,
-      "correct": 12,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.7575,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "DEFINES_CONFIG",
-      "tier": "fact",
-      "N": 166,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "DEPENDS_ON",
-      "tier": "fact",
-      "N": 1228,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "DOCUMENTS",
-      "tier": "derived",
-      "N": 418,
-      "sampled": 31,
-      "pending": 0,
-      "n": 31,
-      "correct": 23,
-      "wrong": 8,
-      "unsure": 0,
-      "p": 0.7419,
-      "lo": 0.5675,
-      "hi": 0.863,
       "floor": 0.9,
-      "status": "under_floor",
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 14,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "EVENT_FLOWS",
+      "tier": "fact",
+      "N": 288,
+      "sampled": 10,
+      "pending": 0,
+      "n": 8,
+      "correct": 2,
+      "wrong": 6,
+      "unsure": 2,
+      "p": 0.25,
+      "lo": 0.0715,
+      "hi": 0.5907,
+      "floor": 0.95,
+      "status": "insufficient",
       "flags": [
-        "under_floor"
+        "under_floor",
+        "insufficient",
+        "noisy"
+      ],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 288,
+          "n": 8,
+          "correct": 2,
+          "p": 0.25
+        }
+      ]
+    },
+    {
+      "category": "EVENT_FLOWS",
+      "tier": "heuristic",
+      "N": 3,
+      "sampled": 3,
+      "pending": 0,
+      "n": 3,
+      "correct": 3,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.4385,
+      "hi": 1.0,
+      "floor": 0.7,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 3,
+          "n": 3,
+          "correct": 3,
+          "p": 1.0
+        }
       ]
     },
     {
@@ -143,46 +366,564 @@
       "hi": 1.0,
       "floor": 0.9,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 18,
+          "n": 18,
+          "correct": 18,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "HANDLED_BY",
       "tier": "derived",
-      "N": 40,
-      "sampled": 30,
+      "N": 63,
+      "sampled": 40,
       "pending": 0,
-      "n": 30,
-      "correct": 30,
+      "n": 40,
+      "correct": 40,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.8552,
       "hi": 1.0,
       "floor": 0.9,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 51,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 12,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "HANDLED_BY",
       "tier": "fact",
-      "N": 59,
-      "sampled": 30,
+      "N": 4553,
+      "sampled": 42,
       "pending": 0,
-      "n": 30,
-      "correct": 30,
+      "n": 42,
+      "correct": 39,
+      "wrong": 3,
+      "unsure": 0,
+      "p": 0.7532,
+      "lo": 0.4736,
+      "hi": 0.912,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 59,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 4494,
+          "n": 12,
+          "correct": 9,
+          "p": 0.75
+        }
+      ]
+    },
+    {
+      "category": "HANDLED_BY",
+      "tier": "heuristic",
+      "N": 155,
+      "sampled": 10,
+      "pending": 0,
+      "n": 10,
+      "correct": 10,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.7225,
       "hi": 1.0,
-      "floor": 0.95,
+      "floor": 0.7,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 155,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "HAS_ATTRIBUTE",
       "tier": "fact",
-      "N": 2184,
+      "N": 6428,
+      "sampled": 23,
+      "pending": 0,
+      "n": 23,
+      "correct": 22,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9474,
+      "lo": 0.7586,
+      "hi": 0.9904,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 2374,
+          "n": 11,
+          "correct": 11,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 4054,
+          "n": 12,
+          "correct": 11,
+          "p": 0.9167
+        }
+      ]
+    },
+    {
+      "category": "HTTP_CALLS",
+      "tier": "derived",
+      "N": 942,
+      "sampled": 18,
+      "pending": 0,
+      "n": 18,
+      "correct": 17,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9098,
+      "lo": 0.6268,
+      "hi": 0.9837,
+      "floor": 0.9,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 7,
+          "n": 7,
+          "correct": 7,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 935,
+          "n": 11,
+          "correct": 10,
+          "p": 0.9091
+        }
+      ]
+    },
+    {
+      "category": "IMPLEMENTS",
+      "tier": "derived",
+      "N": 584,
+      "sampled": 40,
+      "pending": 0,
+      "n": 40,
+      "correct": 40,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.8126,
+      "hi": 1.0,
+      "floor": 0.9,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 321,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 263,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "IMPLEMENTS",
+      "tier": "fact",
+      "N": 3706,
+      "sampled": 41,
+      "pending": 0,
+      "n": 41,
+      "correct": 41,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7632,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 561,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 3145,
+          "n": 11,
+          "correct": 11,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "IMPLEMENTS",
+      "tier": "heuristic",
+      "N": 844,
+      "sampled": 21,
+      "pending": 0,
+      "n": 21,
+      "correct": 21,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7261,
+      "hi": 1.0,
+      "floor": 0.7,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 11,
+          "n": 11,
+          "correct": 11,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 833,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "IMPORTS",
+      "tier": "fact",
+      "N": 23450,
+      "sampled": 41,
+      "pending": 0,
+      "n": 41,
+      "correct": 41,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7714,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 6866,
+          "n": 31,
+          "correct": 31,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 16584,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "IMPORTS",
+      "tier": "heuristic",
+      "N": 14769,
+      "sampled": 40,
+      "pending": 0,
+      "n": 40,
+      "correct": 40,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7241,
+      "hi": 1.0,
+      "floor": 0.7,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 151,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 14618,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "INHERITS_FROM",
+      "tier": "fact",
+      "N": 2202,
+      "sampled": 41,
+      "pending": 0,
+      "n": 41,
+      "correct": 40,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9181,
+      "lo": 0.6533,
+      "hi": 0.9852,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 219,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 1983,
+          "n": 11,
+          "correct": 10,
+          "p": 0.9091
+        }
+      ]
+    },
+    {
+      "category": "INHERITS_FROM",
+      "tier": "heuristic",
+      "N": 1786,
+      "sampled": 18,
+      "pending": 0,
+      "n": 18,
+      "correct": 17,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9004,
+      "lo": 0.5982,
+      "hi": 0.9821,
+      "floor": 0.7,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 8,
+          "n": 8,
+          "correct": 8,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 1778,
+          "n": 10,
+          "correct": 9,
+          "p": 0.9
+        }
+      ]
+    },
+    {
+      "category": "INJECTS",
+      "tier": "fact",
+      "N": 3018,
+      "sampled": 10,
+      "pending": 0,
+      "n": 10,
+      "correct": 10,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7225,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 3018,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "INJECTS",
+      "tier": "heuristic",
+      "N": 590,
+      "sampled": 12,
+      "pending": 0,
+      "n": 12,
+      "correct": 12,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7234,
+      "hi": 1.0,
+      "floor": 0.7,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 2,
+          "n": 2,
+          "correct": 2,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 588,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "NAVIGATES_TO",
+      "tier": "derived",
+      "N": 40,
+      "sampled": 10,
+      "pending": 0,
+      "n": 10,
+      "correct": 2,
+      "wrong": 8,
+      "unsure": 0,
+      "p": 0.2,
+      "lo": 0.0567,
+      "hi": 0.5098,
+      "floor": 0.9,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 40,
+          "n": 10,
+          "correct": 2,
+          "p": 0.2
+        }
+      ]
+    },
+    {
+      "category": "NAVIGATES_TO",
+      "tier": "fact",
+      "N": 24,
+      "sampled": 10,
+      "pending": 0,
+      "n": 10,
+      "correct": 9,
+      "wrong": 1,
+      "unsure": 0,
+      "p": 0.9,
+      "lo": 0.5958,
+      "hi": 0.9821,
+      "floor": 0.95,
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 24,
+          "n": 10,
+          "correct": 9,
+          "p": 0.9
+        }
+      ]
+    },
+    {
+      "category": "READS_CONFIG",
+      "tier": "fact",
+      "N": 777,
+      "sampled": 40,
+      "pending": 0,
+      "n": 40,
+      "correct": 40,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7529,
+      "hi": 1.0,
+      "floor": 0.95,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 144,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 633,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "RETURNS_TYPE",
+      "tier": "fact",
+      "N": 458,
       "sampled": 11,
       "pending": 0,
       "n": 11,
@@ -190,134 +931,31 @@
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.7412,
+      "lo": 0.7231,
       "hi": 1.0,
       "floor": 0.95,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 1,
+          "n": 1,
+          "correct": 1,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 457,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
-      "category": "HTTP_CALLS",
+      "category": "RPC_CALLS",
       "tier": "derived",
-      "N": 7,
-      "sampled": 7,
-      "pending": 0,
-      "n": 7,
-      "correct": 7,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.6457,
-      "hi": 1.0,
-      "floor": 0.9,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "IMPLEMENTS",
-      "tier": "derived",
-      "N": 321,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
-      "floor": 0.9,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "IMPLEMENTS",
-      "tier": "fact",
-      "N": 540,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "IMPLEMENTS",
-      "tier": "heuristic",
-      "N": 14,
-      "sampled": 14,
-      "pending": 0,
-      "n": 14,
-      "correct": 14,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.7847,
-      "hi": 1.0,
-      "floor": 0.7,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "IMPORTS",
-      "tier": "fact",
-      "N": 6556,
-      "sampled": 31,
-      "pending": 0,
-      "n": 31,
-      "correct": 31,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8897,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "IMPORTS",
-      "tier": "heuristic",
-      "N": 160,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 27,
-      "wrong": 3,
-      "unsure": 0,
-      "p": 0.9,
-      "lo": 0.7438,
-      "hi": 0.9654,
-      "floor": 0.7,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "INHERITS_FROM",
-      "tier": "fact",
-      "N": 194,
-      "sampled": 30,
-      "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "INHERITS_FROM",
-      "tier": "heuristic",
       "N": 8,
       "sampled": 8,
       "pending": 0,
@@ -328,116 +966,176 @@
       "p": 1.0,
       "lo": 0.6756,
       "hi": 1.0,
-      "floor": 0.7,
+      "floor": 0.9,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 8,
+          "n": 8,
+          "correct": 8,
+          "p": 1.0
+        }
+      ]
     },
     {
-      "category": "INJECTS",
+      "category": "RPC_CALLS",
       "tier": "heuristic",
-      "N": 2,
-      "sampled": 2,
+      "N": 32,
+      "sampled": 10,
       "pending": 0,
-      "n": 2,
-      "correct": 2,
+      "n": 10,
+      "correct": 10,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.3424,
+      "lo": 0.7225,
       "hi": 1.0,
       "floor": 0.7,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 32,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
-      "category": "READS_CONFIG",
-      "tier": "fact",
-      "N": 145,
-      "sampled": 30,
+      "category": "SAME_AS",
+      "tier": "derived",
+      "N": 240,
+      "sampled": 10,
       "pending": 0,
-      "n": 30,
-      "correct": 30,
+      "n": 10,
+      "correct": 10,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.7225,
       "hi": 1.0,
-      "floor": 0.95,
+      "floor": 0.9,
       "status": "ok",
-      "flags": []
-    },
-    {
-      "category": "RETURNS_TYPE",
-      "tier": "fact",
-      "N": 1,
-      "sampled": 1,
-      "pending": 0,
-      "n": 1,
-      "correct": 1,
-      "wrong": 0,
-      "unsure": 0,
-      "p": 1.0,
-      "lo": 0.2065,
-      "hi": 1.0,
-      "floor": 0.95,
-      "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "heldout",
+          "N": 240,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "SCHEDULES",
       "tier": "fact",
-      "N": 1,
-      "sampled": 1,
+      "N": 24,
+      "sampled": 11,
       "pending": 0,
-      "n": 1,
-      "correct": 1,
+      "n": 11,
+      "correct": 11,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.2065,
+      "lo": 0.734,
       "hi": 1.0,
       "floor": 0.95,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 1,
+          "n": 1,
+          "correct": 1,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 23,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "TESTS",
       "tier": "derived",
-      "N": 214,
-      "sampled": 30,
+      "N": 5267,
+      "sampled": 42,
       "pending": 0,
-      "n": 30,
-      "correct": 30,
-      "wrong": 0,
+      "n": 42,
+      "correct": 40,
+      "wrong": 2,
       "unsure": 0,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0,
+      "p": 0.8401,
+      "lo": 0.5669,
+      "hi": 0.9547,
       "floor": 0.9,
-      "status": "ok",
-      "flags": []
+      "status": "under_floor",
+      "flags": [
+        "under_floor"
+      ],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 214,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 5053,
+          "n": 12,
+          "correct": 10,
+          "p": 0.8333
+        }
+      ]
     },
     {
       "category": "TESTS",
       "tier": "fact",
-      "N": 1,
-      "sampled": 1,
+      "N": 2328,
+      "sampled": 11,
       "pending": 0,
-      "n": 1,
-      "correct": 1,
+      "n": 11,
+      "correct": 11,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.2065,
+      "lo": 0.7226,
       "hi": 1.0,
       "floor": 0.95,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 1,
+          "n": 1,
+          "correct": 1,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 2327,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "USES",
-      "tier": "fact",
-      "N": 10303,
+      "tier": "derived",
+      "N": 53,
       "sampled": 31,
       "pending": 0,
       "n": 31,
@@ -445,93 +1143,167 @@
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.8897,
+      "lo": 0.8886,
+      "hi": 1.0,
+      "floor": 0.9,
+      "status": "ok",
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 52,
+          "n": 30,
+          "correct": 30,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 1,
+          "n": 1,
+          "correct": 1,
+          "p": 1.0
+        }
+      ]
+    },
+    {
+      "category": "USES",
+      "tier": "fact",
+      "N": 27281,
+      "sampled": 41,
+      "pending": 0,
+      "n": 41,
+      "correct": 41,
+      "wrong": 0,
+      "unsure": 0,
+      "p": 1.0,
+      "lo": 0.7927,
       "hi": 1.0,
       "floor": 0.95,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 11461,
+          "n": 31,
+          "correct": 31,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 15820,
+          "n": 10,
+          "correct": 10,
+          "p": 1.0
+        }
+      ]
     },
     {
       "category": "WS_CONNECTS",
       "tier": "derived",
-      "N": 2,
-      "sampled": 2,
+      "N": 4,
+      "sampled": 4,
       "pending": 0,
-      "n": 2,
-      "correct": 2,
+      "n": 4,
+      "correct": 4,
       "wrong": 0,
       "unsure": 0,
       "p": 1.0,
-      "lo": 0.3424,
+      "lo": 1.0,
       "hi": 1.0,
       "floor": 0.9,
       "status": "ok",
-      "flags": []
+      "flags": [],
+      "panels": [
+        {
+          "panel": "fit",
+          "N": 2,
+          "n": 2,
+          "correct": 2,
+          "p": 1.0
+        },
+        {
+          "panel": "heldout",
+          "N": 2,
+          "n": 2,
+          "correct": 2,
+          "p": 1.0
+        }
+      ]
     }
   ],
   "categories": [
     {
       "name": "ACCESSES_DATA",
-      "N": 5,
-      "covered": 5,
-      "n": 5,
-      "p": 1.0,
-      "lo": 1.0,
-      "hi": 1.0
+      "N": 3575,
+      "covered": 3575,
+      "n": 15,
+      "p": 0.7004,
+      "lo": 0.3978,
+      "hi": 0.8922
     },
     {
       "name": "CALLS",
-      "N": 103531,
-      "covered": 103531,
-      "n": 31,
+      "N": 196091,
+      "covered": 196091,
+      "n": 47,
       "p": 1.0,
-      "lo": 0.8897,
+      "lo": 0.817,
       "hi": 1.0
     },
     {
       "name": "CONTAINS",
-      "N": 443,
-      "covered": 443,
-      "n": 10,
-      "p": 1.0,
-      "lo": 0.7225,
-      "hi": 1.0
+      "N": 3891,
+      "covered": 3891,
+      "n": 23,
+      "p": 0.9323,
+      "lo": 0.7004,
+      "hi": 0.9878
     },
     {
       "name": "DEFINES",
-      "N": 50145,
-      "covered": 50145,
-      "n": 12,
+      "N": 145911,
+      "covered": 145911,
+      "n": 21,
       "p": 1.0,
-      "lo": 0.7575,
+      "lo": 0.7292,
       "hi": 1.0
     },
     {
       "name": "DEFINES_CONFIG",
-      "N": 166,
-      "covered": 166,
-      "n": 30,
+      "N": 884,
+      "covered": 884,
+      "n": 41,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.7685,
       "hi": 1.0
     },
     {
       "name": "DEPENDS_ON",
-      "N": 1228,
-      "covered": 1228,
-      "n": 30,
+      "N": 3802,
+      "covered": 3802,
+      "n": 40,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.7754,
       "hi": 1.0
     },
     {
       "name": "DOCUMENTS",
-      "N": 418,
-      "covered": 418,
-      "n": 31,
-      "p": 0.7419,
-      "lo": 0.5745,
-      "hi": 0.8596
+      "N": 1173,
+      "covered": 1173,
+      "n": 40,
+      "p": 0.9419,
+      "lo": 0.8796,
+      "hi": 0.9729
+    },
+    {
+      "name": "EVENT_FLOWS",
+      "N": 305,
+      "covered": 305,
+      "n": 21,
+      "p": 0.2918,
+      "lo": 0.1041,
+      "hi": 0.5936
     },
     {
       "name": "GRPC_CALLS",
@@ -544,117 +1316,144 @@
     },
     {
       "name": "HANDLED_BY",
-      "N": 99,
-      "covered": 99,
-      "n": 60,
-      "p": 1.0,
-      "lo": 0.8865,
-      "hi": 1.0
+      "N": 4771,
+      "covered": 4771,
+      "n": 92,
+      "p": 0.7645,
+      "lo": 0.493,
+      "hi": 0.9155
     },
     {
       "name": "HAS_ATTRIBUTE",
-      "N": 2184,
-      "covered": 2184,
-      "n": 11,
-      "p": 1.0,
-      "lo": 0.7412,
-      "hi": 1.0
+      "N": 6428,
+      "covered": 6428,
+      "n": 23,
+      "p": 0.9474,
+      "lo": 0.7586,
+      "hi": 0.9904
     },
     {
       "name": "HTTP_CALLS",
-      "N": 7,
-      "covered": 7,
-      "n": 7,
-      "p": 1.0,
-      "lo": 1.0,
-      "hi": 1.0
+      "N": 942,
+      "covered": 942,
+      "n": 18,
+      "p": 0.9098,
+      "lo": 0.6268,
+      "hi": 0.9837
     },
     {
       "name": "IMPLEMENTS",
-      "N": 875,
-      "covered": 875,
-      "n": 74,
+      "N": 5134,
+      "covered": 5134,
+      "n": 102,
       "p": 1.0,
-      "lo": 0.8883,
+      "lo": 0.7627,
       "hi": 1.0
     },
     {
       "name": "IMPORTS",
-      "N": 6716,
-      "covered": 6716,
-      "n": 61,
-      "p": 0.9976,
-      "lo": 0.994,
-      "hi": 0.9991
+      "N": 38219,
+      "covered": 38219,
+      "n": 81,
+      "p": 1.0,
+      "lo": 0.7532,
+      "hi": 1.0
     },
     {
       "name": "INHERITS_FROM",
-      "N": 202,
-      "covered": 202,
-      "n": 38,
-      "p": 1.0,
-      "lo": 0.891,
-      "hi": 1.0
+      "N": 3988,
+      "covered": 3988,
+      "n": 59,
+      "p": 0.9102,
+      "lo": 0.7261,
+      "hi": 0.9749
     },
     {
       "name": "INJECTS",
-      "N": 2,
-      "covered": 2,
-      "n": 2,
+      "N": 3608,
+      "covered": 3608,
+      "n": 22,
       "p": 1.0,
-      "lo": 1.0,
+      "lo": 0.7226,
       "hi": 1.0
     },
     {
+      "name": "NAVIGATES_TO",
+      "N": 64,
+      "covered": 64,
+      "n": 20,
+      "p": 0.4625,
+      "lo": 0.3267,
+      "hi": 0.6041
+    },
+    {
       "name": "READS_CONFIG",
-      "N": 145,
-      "covered": 145,
-      "n": 30,
+      "N": 777,
+      "covered": 777,
+      "n": 40,
       "p": 1.0,
-      "lo": 0.8865,
+      "lo": 0.7529,
       "hi": 1.0
     },
     {
       "name": "RETURNS_TYPE",
-      "N": 1,
-      "covered": 1,
-      "n": 1,
+      "N": 458,
+      "covered": 458,
+      "n": 11,
       "p": 1.0,
-      "lo": 1.0,
+      "lo": 0.7231,
+      "hi": 1.0
+    },
+    {
+      "name": "RPC_CALLS",
+      "N": 40,
+      "covered": 40,
+      "n": 18,
+      "p": 1.0,
+      "lo": 0.778,
+      "hi": 1.0
+    },
+    {
+      "name": "SAME_AS",
+      "N": 240,
+      "covered": 240,
+      "n": 10,
+      "p": 1.0,
+      "lo": 0.7225,
       "hi": 1.0
     },
     {
       "name": "SCHEDULES",
-      "N": 1,
-      "covered": 1,
-      "n": 1,
+      "N": 24,
+      "covered": 24,
+      "n": 11,
       "p": 1.0,
-      "lo": 1.0,
+      "lo": 0.734,
       "hi": 1.0
     },
     {
       "name": "TESTS",
-      "N": 215,
-      "covered": 215,
-      "n": 31,
-      "p": 1.0,
-      "lo": 0.887,
-      "hi": 1.0
+      "N": 7595,
+      "covered": 7595,
+      "n": 53,
+      "p": 0.8891,
+      "lo": 0.6811,
+      "hi": 0.9678
     },
     {
       "name": "USES",
-      "N": 10303,
-      "covered": 10303,
-      "n": 31,
+      "N": 27334,
+      "covered": 27334,
+      "n": 72,
       "p": 1.0,
-      "lo": 0.8897,
+      "lo": 0.7929,
       "hi": 1.0
     },
     {
       "name": "WS_CONNECTS",
-      "N": 2,
-      "covered": 2,
-      "n": 2,
+      "N": 4,
+      "covered": 4,
+      "n": 4,
       "p": 1.0,
       "lo": 1.0,
       "hi": 1.0
@@ -663,54 +1462,894 @@
   "tiers": [
     {
       "name": "derived",
-      "N": 1020,
-      "covered": 1020,
-      "n": 148,
-      "p": 0.8942,
-      "lo": 0.818,
-      "hi": 0.9408
+      "N": 8412,
+      "covered": 8412,
+      "n": 277,
+      "p": 0.8779,
+      "lo": 0.6984,
+      "hi": 0.9571
     },
     {
       "name": "fact",
-      "N": 175502,
-      "covered": 175502,
-      "n": 314,
-      "p": 1.0,
-      "lo": 0.8497,
-      "hi": 1.0
+      "N": 428685,
+      "covered": 428685,
+      "n": 511,
+      "p": 0.9925,
+      "lo": 0.9873,
+      "hi": 0.9956
     },
     {
       "name": "heuristic",
-      "N": 184,
-      "covered": 184,
-      "n": 54,
-      "p": 0.913,
-      "lo": 0.7918,
-      "hi": 0.9667
+      "N": 18179,
+      "covered": 18179,
+      "n": 114,
+      "p": 0.9902,
+      "lo": 0.9501,
+      "hi": 0.9981
     }
   ],
   "repos": {
+    "chatwoot": {
+      "edges": 34628,
+      "unjudgeable": 38,
+      "excluded": {},
+      "overall": {
+        "name": "chatwoot",
+        "N": 33865,
+        "covered": 33865,
+        "n": 50,
+        "p": 0.971,
+        "lo": 0.9138,
+        "hi": 0.9907
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 1283,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 2,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.6667,
+          "lo": 0.2077,
+          "hi": 0.9385,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 8159,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 412,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 108,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 17683,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 280,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 170,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "EVENT_FLOWS",
+          "tier": "derived",
+          "N": 10,
+          "sampled": 7,
+          "pending": 0,
+          "n": 7,
+          "correct": 7,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6457,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 2,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "heuristic",
+          "N": 72,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 4,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5101,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 291,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 82,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 1517,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 91,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "heuristic",
+          "N": 390,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "fact",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 0,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.0,
+          "lo": 0.0,
+          "hi": 0.7935,
+          "floor": 0.95,
+          "status": "under_floor",
+          "flags": [
+            "under_floor"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 285,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 4,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5101,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "SAME_AS",
+          "tier": "derived",
+          "N": 2,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "SCHEDULES",
+          "tier": "fact",
+          "N": 16,
+          "sampled": 7,
+          "pending": 0,
+          "n": 7,
+          "correct": 7,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6457,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 2207,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 3,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.75,
+          "lo": 0.3006,
+          "hi": 0.9544,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 802,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "WS_CONNECTS",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        }
+      ]
+    },
+    "gin-vue-admin": {
+      "edges": 9123,
+      "unjudgeable": 11,
+      "excluded": {},
+      "overall": {
+        "name": "gin-vue-admin",
+        "N": 8960,
+        "covered": 8960,
+        "n": 46,
+        "p": 1.0,
+        "lo": 0.248,
+        "hi": 1.0
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 221,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 2805,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 6,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 19,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 3020,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 263,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 269,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "EVENT_FLOWS",
+          "tier": "derived",
+          "N": 4,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "heuristic",
+          "N": 75,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 190,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "derived",
+          "N": 263,
+          "sampled": 10,
+          "pending": 0,
+          "n": 10,
+          "correct": 10,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.7225,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 665,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 152,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "fact",
+          "N": 2,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 18,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "SAME_AS",
+          "tier": "derived",
+          "N": 238,
+          "sampled": 9,
+          "pending": 0,
+          "n": 9,
+          "correct": 9,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.7009,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 92,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 656,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        }
+      ]
+    },
     "glia": {
-      "edges": 156224,
-      "unjudgeable": 136,
+      "edges": 168997,
+      "unjudgeable": 164,
       "excluded": {
-        "org_packages": 5,
-        "skip": 15731
+        "skip": 17674
       },
       "overall": {
         "name": "glia",
-        "N": 138521,
-        "covered": 138521,
-        "n": 227,
-        "p": 0.9993,
-        "lo": 0.9987,
-        "hi": 0.9996
+        "N": 149267,
+        "covered": 149267,
+        "n": 258,
+        "p": 0.9995,
+        "lo": 0.999,
+        "hi": 0.9998
       },
       "strata": [
         {
           "category": "CALLS",
           "tier": "fact",
-          "N": 88821,
+          "N": 95679,
           "sampled": 25,
           "pending": 0,
           "n": 25,
@@ -727,7 +2366,7 @@
         {
           "category": "CONTAINS",
           "tier": "fact",
-          "N": 428,
+          "N": 454,
           "sampled": 9,
           "pending": 0,
           "n": 9,
@@ -746,7 +2385,7 @@
         {
           "category": "DEFINES",
           "tier": "fact",
-          "N": 30947,
+          "N": 33278,
           "sampled": 6,
           "pending": 0,
           "n": 6,
@@ -784,16 +2423,16 @@
         {
           "category": "DOCUMENTS",
           "tier": "derived",
-          "N": 388,
-          "sampled": 27,
+          "N": 382,
+          "sampled": 28,
           "pending": 0,
-          "n": 27,
-          "correct": 20,
-          "wrong": 7,
+          "n": 28,
+          "correct": 23,
+          "wrong": 5,
           "unsure": 0,
-          "p": 0.7407,
-          "lo": 0.5532,
-          "hi": 0.8683,
+          "p": 0.8214,
+          "lo": 0.6441,
+          "hi": 0.9212,
           "floor": 0.9,
           "status": "under_floor",
           "flags": [
@@ -804,14 +2443,14 @@
           "category": "HANDLED_BY",
           "tier": "derived",
           "N": 23,
-          "sampled": 17,
+          "sampled": 14,
           "pending": 0,
-          "n": 17,
-          "correct": 17,
+          "n": 14,
+          "correct": 14,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.8157,
+          "lo": 0.7847,
           "hi": 1.0,
           "floor": 0.9,
           "status": "ok",
@@ -820,7 +2459,7 @@
         {
           "category": "HAS_ATTRIBUTE",
           "tier": "fact",
-          "N": 1922,
+          "N": 2113,
           "sampled": 8,
           "pending": 0,
           "n": 8,
@@ -839,7 +2478,7 @@
         {
           "category": "IMPLEMENTS",
           "tier": "fact",
-          "N": 473,
+          "N": 491,
           "sampled": 26,
           "pending": 0,
           "n": 26,
@@ -856,7 +2495,7 @@
         {
           "category": "IMPORTS",
           "tier": "fact",
-          "N": 5421,
+          "N": 5682,
           "sampled": 24,
           "pending": 0,
           "n": 24,
@@ -873,15 +2512,15 @@
         {
           "category": "IMPORTS",
           "tier": "heuristic",
-          "N": 148,
-          "sampled": 27,
+          "N": 151,
+          "sampled": 30,
           "pending": 0,
-          "n": 27,
-          "correct": 27,
+          "n": 30,
+          "correct": 30,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.8754,
+          "lo": 0.8865,
           "hi": 1.0,
           "floor": 0.7,
           "status": "ok",
@@ -890,7 +2529,7 @@
         {
           "category": "READS_CONFIG",
           "tier": "fact",
-          "N": 67,
+          "N": 66,
           "sampled": 14,
           "pending": 0,
           "n": 14,
@@ -924,7 +2563,7 @@
         {
           "category": "TESTS",
           "tier": "derived",
-          "N": 49,
+          "N": 50,
           "sampled": 7,
           "pending": 0,
           "n": 7,
@@ -959,8 +2598,25 @@
         },
         {
           "category": "USES",
+          "tier": "derived",
+          "N": 52,
+          "sampled": 30,
+          "pending": 0,
+          "n": 30,
+          "correct": 30,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.8865,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "USES",
           "tier": "fact",
-          "N": 9506,
+          "N": 10518,
           "sampled": 27,
           "pending": 0,
           "n": 27,
@@ -976,18 +2632,933 @@
         }
       ]
     },
+    "hoppscotch": {
+      "edges": 35428,
+      "unjudgeable": 25,
+      "excluded": {},
+      "overall": {
+        "name": "hoppscotch",
+        "N": 32992,
+        "covered": 32992,
+        "n": 33,
+        "p": 0.9956,
+        "lo": 0.2608,
+        "hi": 0.9991
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 146,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 0,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.0,
+          "lo": 0.0,
+          "hi": 0.7935,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 14817,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 91,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 20,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 7525,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 722,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 15,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "derived",
+          "N": 3,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 97,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "heuristic",
+          "N": 8,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HAS_ATTRIBUTE",
+          "tier": "fact",
+          "N": 330,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 25,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 110,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "heuristic",
+          "N": 3,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 4951,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 38,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "heuristic",
+          "N": 11,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "fact",
+          "N": 77,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "heuristic",
+          "N": 84,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "fact",
+          "N": 7,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 97,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "SCHEDULES",
+          "tier": "fact",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 134,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 3679,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        }
+      ]
+    },
+    "mealie": {
+      "edges": 32208,
+      "unjudgeable": 13,
+      "excluded": {},
+      "overall": {
+        "name": "mealie",
+        "N": 30487,
+        "covered": 30487,
+        "n": 53,
+        "p": 0.9867,
+        "lo": 0.933,
+        "hi": 0.9975
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 478,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 8101,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 45,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 6736,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 105,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 32,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "derived",
+          "N": 2,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 289,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HAS_ATTRIBUTE",
+          "tier": "fact",
+          "N": 3660,
+          "sampled": 9,
+          "pending": 0,
+          "n": 9,
+          "correct": 8,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.8889,
+          "lo": 0.565,
+          "hi": 0.9801,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 13,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 5,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 3567,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "heuristic",
+          "N": 230,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 665,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "fact",
+          "N": 61,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 30,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "RETURNS_TYPE",
+          "tier": "fact",
+          "N": 457,
+          "sampled": 10,
+          "pending": 0,
+          "n": 10,
+          "correct": 10,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.7225,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "SCHEDULES",
+          "tier": "fact",
+          "N": 4,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 188,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "fact",
+          "N": 2327,
+          "sampled": 10,
+          "pending": 0,
+          "n": 10,
+          "correct": 10,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.7225,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 3491,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        }
+      ]
+    },
     "microservices-demo": {
-      "edges": 4858,
+      "edges": 4883,
       "unjudgeable": 97,
       "excluded": {},
       "overall": {
         "name": "microservices-demo",
-        "N": 4575,
-        "covered": 4575,
+        "N": 4600,
+        "covered": 4600,
         "n": 161,
-        "p": 0.9987,
-        "lo": 0.3462,
-        "hi": 0.9997
+        "p": 1.0,
+        "lo": 0.3472,
+        "hi": 1.0
       },
       "strata": [
         {
@@ -1065,7 +3636,7 @@
         {
           "category": "DEFINES",
           "tier": "fact",
-          "N": 2530,
+          "N": 2542,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1137,15 +3708,15 @@
         {
           "category": "HANDLED_BY",
           "tier": "derived",
-          "N": 17,
-          "sampled": 13,
+          "N": 28,
+          "sampled": 16,
           "pending": 0,
-          "n": 13,
-          "correct": 13,
+          "n": 16,
+          "correct": 16,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.7719,
+          "lo": 0.8064,
           "hi": 1.0,
           "floor": 0.9,
           "status": "ok",
@@ -1171,7 +3742,7 @@
         {
           "category": "HAS_ATTRIBUTE",
           "tier": "fact",
-          "N": 34,
+          "N": 33,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1224,43 +3795,26 @@
         {
           "category": "IMPLEMENTS",
           "tier": "fact",
-          "N": 12,
-          "sampled": 1,
+          "N": 15,
+          "sampled": 2,
           "pending": 0,
-          "n": 1,
-          "correct": 1,
+          "n": 2,
+          "correct": 2,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.2065,
+          "lo": 0.3424,
           "hi": 1.0,
           "floor": 0.95,
           "status": "insufficient",
           "flags": [
             "insufficient"
           ]
-        },
-        {
-          "category": "IMPLEMENTS",
-          "tier": "heuristic",
-          "N": 3,
-          "sampled": 3,
-          "pending": 0,
-          "n": 3,
-          "correct": 3,
-          "wrong": 0,
-          "unsure": 0,
-          "p": 1.0,
-          "lo": 0.4385,
-          "hi": 1.0,
-          "floor": 0.7,
-          "status": "ok",
-          "flags": []
         },
         {
           "category": "IMPORTS",
           "tier": "fact",
-          "N": 16,
+          "N": 25,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1273,26 +3827,6 @@
           "floor": 0.95,
           "status": "insufficient",
           "flags": [
-            "insufficient"
-          ]
-        },
-        {
-          "category": "IMPORTS",
-          "tier": "heuristic",
-          "N": 6,
-          "sampled": 1,
-          "pending": 0,
-          "n": 1,
-          "correct": 0,
-          "wrong": 1,
-          "unsure": 0,
-          "p": 0.0,
-          "lo": 0.0,
-          "hi": 0.7935,
-          "floor": 0.7,
-          "status": "insufficient",
-          "flags": [
-            "under_floor",
             "insufficient"
           ]
         },
@@ -1390,16 +3924,16 @@
       ]
     },
     "samples": {
-      "edges": 30291,
-      "unjudgeable": 12,
+      "edges": 30752,
+      "unjudgeable": 13,
       "excluded": {},
       "overall": {
         "name": "samples",
-        "N": 30219,
-        "covered": 30219,
-        "n": 81,
-        "p": 0.9999,
-        "lo": 0.4448,
+        "N": 30679,
+        "covered": 30679,
+        "n": 77,
+        "p": 1.0,
+        "lo": 0.3964,
         "hi": 1.0
       },
       "strata": [
@@ -1423,7 +3957,7 @@
         {
           "category": "CALLS",
           "tier": "fact",
-          "N": 12291,
+          "N": 12665,
           "sampled": 3,
           "pending": 0,
           "n": 3,
@@ -1461,15 +3995,15 @@
         {
           "category": "DEFINES",
           "tier": "fact",
-          "N": 15448,
-          "sampled": 3,
+          "N": 15449,
+          "sampled": 2,
           "pending": 0,
-          "n": 3,
-          "correct": 3,
+          "n": 2,
+          "correct": 2,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.4385,
+          "lo": 0.3424,
           "hi": 1.0,
           "floor": 0.95,
           "status": "insufficient",
@@ -1497,15 +4031,15 @@
         {
           "category": "DOCUMENTS",
           "tier": "derived",
-          "N": 28,
-          "sampled": 2,
+          "N": 26,
+          "sampled": 1,
           "pending": 0,
-          "n": 2,
-          "correct": 2,
+          "n": 1,
+          "correct": 1,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.3424,
+          "lo": 0.2065,
           "hi": 1.0,
           "floor": 0.9,
           "status": "insufficient",
@@ -1555,14 +4089,14 @@
           "category": "IMPLEMENTS",
           "tier": "fact",
           "N": 33,
-          "sampled": 2,
+          "sampled": 1,
           "pending": 0,
-          "n": 2,
-          "correct": 2,
+          "n": 1,
+          "correct": 1,
           "wrong": 0,
           "unsure": 0,
           "p": 1.0,
-          "lo": 0.3424,
+          "lo": 0.2065,
           "hi": 1.0,
           "floor": 0.95,
           "status": "insufficient",
@@ -1590,7 +4124,7 @@
         {
           "category": "IMPORTS",
           "tier": "fact",
-          "N": 1078,
+          "N": 1118,
           "sampled": 4,
           "pending": 0,
           "n": 4,
@@ -1607,29 +4141,9 @@
           ]
         },
         {
-          "category": "IMPORTS",
-          "tier": "heuristic",
-          "N": 2,
-          "sampled": 1,
-          "pending": 0,
-          "n": 1,
-          "correct": 0,
-          "wrong": 1,
-          "unsure": 0,
-          "p": 0.0,
-          "lo": 0.0,
-          "hi": 0.7935,
-          "floor": 0.7,
-          "status": "insufficient",
-          "flags": [
-            "under_floor",
-            "insufficient"
-          ]
-        },
-        {
           "category": "INHERITS_FROM",
           "tier": "fact",
-          "N": 185,
+          "N": 210,
           "sampled": 28,
           "pending": 0,
           "n": 28,
@@ -1682,7 +4196,7 @@
         {
           "category": "TESTS",
           "tier": "derived",
-          "N": 48,
+          "N": 47,
           "sampled": 7,
           "pending": 0,
           "n": 7,
@@ -1701,7 +4215,7 @@
         {
           "category": "USES",
           "tier": "fact",
-          "N": 412,
+          "N": 437,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1720,23 +4234,23 @@
       ]
     },
     "shell": {
-      "edges": 2377,
+      "edges": 2500,
       "unjudgeable": 0,
       "excluded": {},
       "overall": {
         "name": "shell",
-        "N": 2365,
-        "covered": 2365,
-        "n": 16,
-        "p": 0.9996,
-        "lo": 0.2095,
-        "hi": 0.9996
+        "N": 2488,
+        "covered": 2488,
+        "n": 15,
+        "p": 1.0,
+        "lo": 0.2094,
+        "hi": 1.0
       },
       "strata": [
         {
           "category": "CALLS",
           "tier": "fact",
-          "N": 1309,
+          "N": 1311,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1769,25 +4283,6 @@
           "status": "insufficient",
           "flags": [
             "insufficient"
-          ]
-        },
-        {
-          "category": "DOCUMENTS",
-          "tier": "derived",
-          "N": 1,
-          "sampled": 1,
-          "pending": 0,
-          "n": 1,
-          "correct": 0,
-          "wrong": 1,
-          "unsure": 0,
-          "p": 0.0,
-          "lo": 0.0,
-          "hi": 0.7935,
-          "floor": 0.9,
-          "status": "under_floor",
-          "flags": [
-            "under_floor"
           ]
         },
         {
@@ -1884,7 +4379,7 @@
         {
           "category": "USES",
           "tier": "fact",
-          "N": 89,
+          "N": 211,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -1902,18 +4397,926 @@
         }
       ]
     },
+    "squidex": {
+      "edges": 63218,
+      "unjudgeable": 33,
+      "excluded": {},
+      "overall": {
+        "name": "squidex",
+        "N": 58693,
+        "covered": 58693,
+        "n": 69,
+        "p": 0.9712,
+        "lo": 0.9492,
+        "hi": 0.9839
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 235,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 17742,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 2843,
+          "sampled": 8,
+          "pending": 0,
+          "n": 8,
+          "correct": 8,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6756,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 430,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 22801,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 465,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 14,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 611,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 0,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.0,
+          "lo": 0.0,
+          "hi": 0.7935,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 72,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 0,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.0,
+          "lo": 0.0,
+          "hi": 0.7935,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 1876,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "heuristic",
+          "N": 594,
+          "sampled": 7,
+          "pending": 0,
+          "n": 7,
+          "correct": 7,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6457,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 1838,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "heuristic",
+          "N": 1458,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 421,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 1,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.5,
+          "lo": 0.0945,
+          "hi": 0.9055,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "heuristic",
+          "N": 875,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 3,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.75,
+          "lo": 0.3006,
+          "hi": 0.9544,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "fact",
+          "N": 573,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "heuristic",
+          "N": 228,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 4,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5101,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "derived",
+          "N": 39,
+          "sampled": 9,
+          "pending": 0,
+          "n": 9,
+          "correct": 1,
+          "wrong": 8,
+          "unsure": 0,
+          "p": 0.1111,
+          "lo": 0.0199,
+          "hi": 0.435,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "NAVIGATES_TO",
+          "tier": "fact",
+          "N": 14,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 72,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 1623,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 2,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.6667,
+          "lo": 0.2077,
+          "hi": 0.9385,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 3868,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        }
+      ]
+    },
+    "tolgee": {
+      "edges": 81556,
+      "unjudgeable": 34,
+      "excluded": {},
+      "overall": {
+        "name": "tolgee",
+        "N": 80495,
+        "covered": 80495,
+        "n": 50,
+        "p": 0.995,
+        "lo": 0.9786,
+        "hi": 0.9988
+      },
+      "strata": [
+        {
+          "category": "ACCESSES_DATA",
+          "tier": "fact",
+          "N": 1207,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 2,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.6667,
+          "lo": 0.2077,
+          "hi": 0.9385,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 27289,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 0,
+          "wrong": 1,
+          "unsure": 0,
+          "p": 0.0,
+          "lo": 0.0,
+          "hi": 0.7935,
+          "floor": 0.95,
+          "status": "under_floor",
+          "flags": [
+            "under_floor"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 46,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 27707,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 306,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 135,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 653,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HAS_ATTRIBUTE",
+          "tier": "fact",
+          "N": 42,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HTTP_CALLS",
+          "tier": "derived",
+          "N": 344,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 804,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "heuristic",
+          "N": 134,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 2710,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "heuristic",
+          "N": 12930,
+          "sampled": 8,
+          "pending": 0,
+          "n": 8,
+          "correct": 8,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6756,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 566,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "heuristic",
+          "N": 326,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "fact",
+          "N": 2307,
+          "sampled": 7,
+          "pending": 0,
+          "n": 7,
+          "correct": 7,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6457,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INJECTS",
+          "tier": "heuristic",
+          "N": 276,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 42,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "SCHEDULES",
+          "tier": "fact",
+          "N": 2,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 700,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 1967,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "WS_CONNECTS",
+          "tier": "derived",
+          "N": 1,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        }
+      ]
+    },
     "websocket": {
-      "edges": 1026,
+      "edges": 1021,
       "unjudgeable": 0,
       "excluded": {},
       "overall": {
         "name": "websocket",
-        "N": 1026,
-        "covered": 1026,
-        "n": 31,
-        "p": 0.9961,
-        "lo": 0.2597,
-        "hi": 0.9992
+        "N": 1021,
+        "covered": 1021,
+        "n": 30,
+        "p": 1.0,
+        "lo": 0.2607,
+        "hi": 1.0
       },
       "strata": [
         {
@@ -2027,26 +5430,6 @@
           ]
         },
         {
-          "category": "IMPORTS",
-          "tier": "heuristic",
-          "N": 4,
-          "sampled": 1,
-          "pending": 0,
-          "n": 1,
-          "correct": 0,
-          "wrong": 1,
-          "unsure": 0,
-          "p": 0.0,
-          "lo": 0.0,
-          "hi": 0.7935,
-          "floor": 0.7,
-          "status": "insufficient",
-          "flags": [
-            "under_floor",
-            "insufficient"
-          ]
-        },
-        {
           "category": "TESTS",
           "tier": "derived",
           "N": 78,
@@ -2066,7 +5449,7 @@
         {
           "category": "USES",
           "tier": "fact",
-          "N": 82,
+          "N": 81,
           "sampled": 1,
           "pending": 0,
           "n": 1,
@@ -2100,66 +5483,545 @@
           "flags": []
         }
       ]
+    },
+    "zora-protocol": {
+      "edges": 23222,
+      "unjudgeable": 17,
+      "excluded": {},
+      "overall": {
+        "name": "zora-protocol",
+        "N": 21729,
+        "covered": 21729,
+        "n": 60,
+        "p": 0.9465,
+        "lo": 0.8735,
+        "hi": 0.9784
+      },
+      "strata": [
+        {
+          "category": "CALLS",
+          "tier": "derived",
+          "N": 5,
+          "sampled": 5,
+          "pending": 0,
+          "n": 5,
+          "correct": 5,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5655,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "CALLS",
+          "tier": "fact",
+          "N": 6407,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "CONTAINS",
+          "tier": "fact",
+          "N": 69,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES_CONFIG",
+          "tier": "fact",
+          "N": 50,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEFINES",
+          "tier": "fact",
+          "N": 7950,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DEPENDS_ON",
+          "tier": "fact",
+          "N": 433,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "DOCUMENTS",
+          "tier": "derived",
+          "N": 129,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "EVENT_FLOWS",
+          "tier": "fact",
+          "N": 288,
+          "sampled": 10,
+          "pending": 0,
+          "n": 8,
+          "correct": 2,
+          "wrong": 6,
+          "unsure": 2,
+          "p": 0.25,
+          "lo": 0.0715,
+          "hi": 0.5907,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient",
+            "noisy"
+          ]
+        },
+        {
+          "category": "EVENT_FLOWS",
+          "tier": "heuristic",
+          "N": 3,
+          "sampled": 3,
+          "pending": 0,
+          "n": 3,
+          "correct": 3,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.4385,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "derived",
+          "N": 5,
+          "sampled": 4,
+          "pending": 0,
+          "n": 4,
+          "correct": 4,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.5101,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HANDLED_BY",
+          "tier": "fact",
+          "N": 2841,
+          "sampled": 6,
+          "pending": 0,
+          "n": 6,
+          "correct": 4,
+          "wrong": 2,
+          "unsure": 0,
+          "p": 0.6667,
+          "lo": 0.3,
+          "hi": 0.9032,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "under_floor",
+            "insufficient"
+          ]
+        },
+        {
+          "category": "HAS_ATTRIBUTE",
+          "tier": "fact",
+          "N": 22,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "fact",
+          "N": 268,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPLEMENTS",
+          "tier": "heuristic",
+          "N": 102,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "IMPORTS",
+          "tier": "fact",
+          "N": 1336,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "fact",
+          "N": 50,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "INHERITS_FROM",
+          "tier": "heuristic",
+          "N": 176,
+          "sampled": 2,
+          "pending": 0,
+          "n": 2,
+          "correct": 2,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.3424,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "READS_CONFIG",
+          "tier": "fact",
+          "N": 89,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "RPC_CALLS",
+          "tier": "derived",
+          "N": 8,
+          "sampled": 8,
+          "pending": 0,
+          "n": 8,
+          "correct": 8,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.6756,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "RPC_CALLS",
+          "tier": "heuristic",
+          "N": 32,
+          "sampled": 10,
+          "pending": 0,
+          "n": 10,
+          "correct": 10,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.7225,
+          "hi": 1.0,
+          "floor": 0.7,
+          "status": "ok",
+          "flags": []
+        },
+        {
+          "category": "TESTS",
+          "tier": "derived",
+          "N": 109,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.9,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        },
+        {
+          "category": "USES",
+          "tier": "fact",
+          "N": 1357,
+          "sampled": 1,
+          "pending": 0,
+          "n": 1,
+          "correct": 1,
+          "wrong": 0,
+          "unsure": 0,
+          "p": 1.0,
+          "lo": 0.2065,
+          "hi": 1.0,
+          "floor": 0.95,
+          "status": "insufficient",
+          "flags": [
+            "insufficient"
+          ]
+        }
+      ]
     }
   },
   "under_floor": [
-    "DOCUMENTS|derived"
+    "ACCESSES_DATA|fact",
+    "CONTAINS|fact",
+    "EVENT_FLOWS|fact",
+    "HANDLED_BY|fact",
+    "HAS_ATTRIBUTE|fact",
+    "INHERITS_FROM|fact",
+    "NAVIGATES_TO|derived",
+    "NAVIGATES_TO|fact",
+    "TESTS|derived"
   ],
   "agreement": {
     "rule": "matched",
     "families": [
       {
-        "name": "mechanism",
-        "expected": 20,
-        "rejudged": 21,
+        "name": "heldout",
+        "expected": 56,
+        "rejudged": 56,
         "missing": 0,
-        "extra": 1,
-        "agree": 21,
+        "extra": 0,
+        "agree": 56,
         "raw_agreement": 1.0,
-        "expected_agreement": 0.5283,
+        "expected_agreement": 0.5,
         "kappa": 1.0,
         "status": "ok",
         "matrix": {
-          "correct/correct": 13,
-          "wrong/wrong": 8
+          "correct/correct": 28,
+          "wrong/wrong": 28
+        }
+      },
+      {
+        "name": "mechanism",
+        "expected": 20,
+        "rejudged": 20,
+        "missing": 0,
+        "extra": 0,
+        "agree": 20,
+        "raw_agreement": 1.0,
+        "expected_agreement": 0.625,
+        "kappa": 1.0,
+        "status": "ok",
+        "matrix": {
+          "correct/correct": 15,
+          "wrong/wrong": 5
         }
       },
       {
         "name": "structure",
         "expected": 20,
-        "rejudged": 33,
+        "rejudged": 27,
         "missing": 0,
-        "extra": 13,
-        "agree": 33,
+        "extra": 7,
+        "agree": 27,
         "raw_agreement": 1.0,
-        "expected_agreement": 0.8347,
-        "kappa": 1.0,
-        "status": "ok",
+        "expected_agreement": 1.0,
+        "kappa": null,
+        "status": "undefined",
         "matrix": {
-          "correct/correct": 30,
-          "wrong/wrong": 3
+          "correct/correct": 27
         }
       }
     ],
     "overall": {
       "name": "overall",
-      "expected": 40,
-      "rejudged": 54,
+      "expected": 96,
+      "rejudged": 103,
       "missing": 0,
-      "extra": 14,
-      "agree": 54,
+      "extra": 7,
+      "agree": 103,
       "raw_agreement": 1.0,
-      "expected_agreement": 0.6756,
+      "expected_agreement": 0.5645,
       "kappa": 1.0,
       "status": "ok",
       "matrix": {
-        "correct/correct": 43,
-        "wrong/wrong": 11
+        "correct/correct": 70,
+        "wrong/wrong": 33
       }
     },
     "disagreements": 0,
     "adjudicated": 0,
     "unadjudicated": 0,
-    "low_agreement": []
+    "low_agreement": [],
+    "independence": {
+      "pairs": 103,
+      "independent": 44,
+      "self_pairs": 59,
+      "agree": 44,
+      "expected_agreement": 0.7986,
+      "kappa": 1.0,
+      "status": "ok",
+      "by_judge": {
+        "FD.3c": {
+          "pairs": 28,
+          "self_pairs": 0
+        },
+        "GP.14r": {
+          "pairs": 3,
+          "self_pairs": 3
+        },
+        "HC.3r": {
+          "pairs": 56,
+          "self_pairs": 56
+        },
+        "HP.5x": {
+          "pairs": 16,
+          "self_pairs": 0
+        }
+      }
+    }
   }
 }
