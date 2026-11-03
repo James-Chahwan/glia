@@ -892,9 +892,9 @@
     "dead_symbol": 6056,
     "endpoints": 89,
     "error": null,
-    "http_pairs": 72,
-    "route_reach": 0.489,
-    "routes": 307
+    "http_pairs": 68,
+    "route_reach": 0.432,
+    "routes": 359
    },
    "misses": {
     "glia_blind": 10,
