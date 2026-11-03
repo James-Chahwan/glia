@@ -147,7 +147,23 @@ Phases are in ms.
 - **Slowest pass**: `tag_synthetic_provenance` (twenty 474 ms, tolgee 82 ms, photoprism 53 ms) and
   `org_packages` (prefect 110 ms). Neither is near the phase floor.
 
+
+## The 0.5.7 release candidate (the release close-out's `timing` gate)
+
+The release close-out (W13, glia f2f5a7551fd8, the tree the tag is cut from but for docs and the
+cohort re-baseline) ran the gate against the W1 baseline: `[build-timing] check: ok - 4 repos, 52 phases, 0 gains,
+0 regressions`. Medians, W1 baseline -> RC (same machine, same recipe):
+
+| repo | wall ms | cpu ms | rss MB | glia total ms |
+|---|---|---|---|---|
+| twenty | 15784.9 -> 16246.4 | 83379.7 -> 85153.9 | 1793.0 -> 1871.1 | 13969.5 -> 14418.0 |
+| photoprism | 2946.3 -> 2954.8 | 19954.5 -> 20353.8 | 468.3 -> 475.6 | 2489.7 -> 2492.5 |
+| prefect | 3293.4 -> 3321.2 | 22322.1 -> 23166.0 | 579.1 -> 581.8 | 2764.4 -> 2785.0 |
+| tolgee | 2358.9 -> 2316.5 | 14430.1 -> 14678.6 | 370.1 -> 379.8 | 1960.0 -> 1926.7 |
+
+Every 0.5.7 packet that changed graph content landed between the two rows (HF, HT, HC, HQ); none moved a build
+phase past the gate's thresholds.
+
 ## Followups
 
-- HZ.1 (the release docs) / the release's last close-out: the `timing` gate's `check` line at the 0.5.7
-  release candidate is this note's last row. Add it here beside the W1 baseline as the 0.5.7 RC row.
+- Done at the release close-out: the 0.5.7 RC row is the section above.
