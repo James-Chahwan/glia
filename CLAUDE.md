@@ -2936,10 +2936,10 @@ questions over one graph computes `entrypoint_reachable` once.
   James asks. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
   security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated" items stay
   out (`SECURITY.md`).
-- **0.5.7 — build targets, proof and process: complete on `main` (waves W0-W12, the release docs and
-  handoffs in W13: HZ.1, HZ.2); the release close-out ran every gate in full (a899413a: rank `1176 rows, 94
+- **0.5.7 — build targets, proof and process: released 2026-11-03 (tag `v0.5.7`, `glia-py` 0.5.7 and `glia-cli` 0.5.7 on PyPI; wheels-py 41610436971, wheels-cli 41610437077); waves W0-W12, the release docs and
+  handoffs in W13 (HZ.1, HZ.2); the release close-out ran every gate in full (a899413a: rank `1176 rows, 94
   gains, 0 drops`, cohort `21 repos, 200 tasks, 76 gains, 0 drops` after three cells re-recorded as precision
-  gains, 7ecabf56); version bumped, awaiting the tag.** James
+  gains, 7ecabf56).** James
   2026-11-02 split the 0.5.7 scope in two either side of the weekly usage reset (*"we could make 0.5.7 2
   releases due weekly cutoff reset"*; the split: *"Fine"*). Scope `dev-notes/next-leap-0.5.7.md` (§6 the
   split and its rulings), packets `dev-notes/leap-057-packets.json` (each with its `decisions`),
